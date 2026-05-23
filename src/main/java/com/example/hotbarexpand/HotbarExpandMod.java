@@ -2,6 +2,7 @@ package com.example.hotbarexpand;
 
 import com.example.hotbarexpand.client.ClientSetup;
 import com.example.hotbarexpand.client.ExpandedHotbarOverlay;
+import com.example.hotbarexpand.client.HotbarDataHandler;
 import com.example.hotbarexpand.client.HotbarManager;
 import com.example.hotbarexpand.client.gui.HotbarInventoryScreen;
 import com.example.hotbarexpand.client.gui.OptionsButtonHandler;
@@ -33,6 +34,8 @@ public class HotbarExpandMod {
             System.out.println("[HotbarExpand] HotbarInventoryScreen registered");
             eventBus.register(OptionsButtonHandler.class);
             System.out.println("[HotbarExpand] OptionsButtonHandler registered");
+            eventBus.register(HotbarDataHandler.class);
+            System.out.println("[HotbarExpand] HotbarDataHandler registered");
         }
     }
 

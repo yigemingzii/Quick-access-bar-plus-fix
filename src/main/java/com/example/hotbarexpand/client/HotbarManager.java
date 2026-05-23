@@ -1,34 +1,21 @@
 package com.example.hotbarexpand.client;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.core.NonNullList;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.NbtAccounter;
-import net.minecraft.nbt.NbtIo;
-import net.minecraft.world.ContainerHelper;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.nio.file.Files;
-import java.nio.file.Path;
 
 public class HotbarManager {
-    private static final int HOTBAR_COUNT = 9;
-    private static final int SLOTS_PER_HOTBAR = 9;
-    private static final int AUTO_SAVE_INTERVAL = 200;
-
-    // 9个快捷栏，每个包含9个物品槽
-    private static final List<ItemStack>[] hotbars = new ArrayList[HOTBAR_COUNT];
-    // 9个副手物品槽
-    private static final ItemStack[] offhandSlots = new ItemStack[HOTBAR_COUNT];
+    // 使用ArrayList支持动态扩展，初始9个快捷栏，每个包含9个物品槽
+    private static final List<List<ItemStack>> hotbars = new ArrayList<>();
+    // 副手物品槽列表
+    private static final List<ItemStack> offhandSlots = new ArrayList<>();
     
-    // 当前激活的快捷栏索引（0-8）
+    // 当前激活的快捷栏索引
     private static int currentHotbarIndex = 0;
     
     // 展开状态
@@ -36,37 +23,53 @@ public class HotbarManager {
     
     // 切换冷却，防止同步干扰
     private static int switchCooldown = 0;
-    private static int autoSaveCooldown = AUTO_SAVE_INTERVAL;
-    private static boolean dirty = false;
     
     static {
-        for (int i = 0; i < HOTBAR_COUNT; i++) {
-            hotbars[i] = new ArrayList<>();
-            for (int j = 0; j < SLOTS_PER_HOTBAR; j++) {
-                hotbars[i].add(ItemStack.EMPTY);
+        // 初始化9个默认快捷栏
+        for (int i = 0; i < 9; i++) {
+            List<ItemStack> hotbar = new ArrayList<>();
+            for (int j = 0; j < 9; j++) {
+                hotbar.add(ItemStack.EMPTY);
             }
-            offhandSlots[i] = ItemStack.EMPTY;
+            hotbars.add(hotbar);
+            offhandSlots.add(ItemStack.EMPTY);
+        }
+    }
+    
+    /**
+     * 确保指定索引的快捷栏存在
+     */
+    private static void ensureHotbarExists(int index) {
+        while (hotbars.size() <= index) {
+            List<ItemStack> newHotbar = new ArrayList<>();
+            for (int j = 0; j < 9; j++) {
+                newHotbar.add(ItemStack.EMPTY);
+            }
+            hotbars.add(newHotbar);
+            offhandSlots.add(ItemStack.EMPTY);
         }
     }
     
     public static List<ItemStack> getHotbar(int index) {
-        if (index >= 0 && index < HOTBAR_COUNT) {
-            return hotbars[index];
+        if (index >= 0) {
+            ensureHotbarExists(index);
+            return hotbars.get(index);
         }
-        return hotbars[0];
+        return hotbars.get(0);
     }
     
     public static ItemStack getOffhandItem(int index) {
-        if (index >= 0 && index < HOTBAR_COUNT) {
-            return offhandSlots[index];
+        if (index >= 0) {
+            ensureHotbarExists(index);
+            return offhandSlots.get(index);
         }
         return ItemStack.EMPTY;
     }
     
     public static void setOffhandItem(int index, ItemStack stack) {
-        if (index >= 0 && index < HOTBAR_COUNT) {
-            offhandSlots[index] = stack.copy();
-            markDirty();
+        if (index >= 0) {
+            ensureHotbarExists(index);
+            offhandSlots.set(index, stack.copy());
             
             // 如果设置的是当前快捷栏，同时更新玩家副手
             if (index == currentHotbarIndex) {
@@ -79,12 +82,100 @@ public class HotbarManager {
         }
     }
     
+    /**
+     * 获取快捷栏数量
+     */
+    public static int getHotbarCount() {
+        return hotbars.size();
+    }
+    
+    /**
+     * 添加新的快捷栏
+     */
+    public static void addHotbar() {
+        List<ItemStack> newHotbar = new ArrayList<>();
+        for (int j = 0; j < 9; j++) {
+            newHotbar.add(ItemStack.EMPTY);
+        }
+        hotbars.add(newHotbar);
+        offhandSlots.add(ItemStack.EMPTY);
+    }
+    
+    /**
+     * 删除指定索引的快捷栏
+     */
+    public static void removeHotbar(int index) {
+        if (index >= 0 && index < hotbars.size() && hotbars.size() > 1) {
+            // 如果要删除的是当前正在使用的快捷栏，先保存玩家背包数据
+            if (index == currentHotbarIndex) {
+                savePlayerInventoryToHotbar(index);
+            }
+            
+            // 从列表中移除
+            hotbars.remove(index);
+            offhandSlots.remove(index);
+            
+            // 调整当前索引
+            if (currentHotbarIndex >= hotbars.size()) {
+                currentHotbarIndex = hotbars.size() - 1;
+            } else if (index < currentHotbarIndex) {
+                // 如果删除的索引在当前索引之前，当前索引需要减1
+                currentHotbarIndex--;
+            }
+            
+            // 如果删除后还有快捷栏，且当前索引有效，加载该快捷栏到玩家背包
+            if (hotbars.size() > 0 && currentHotbarIndex >= 0 && currentHotbarIndex < hotbars.size()) {
+                loadHotbarToPlayer(currentHotbarIndex);
+            }
+        }
+    }
+    
+    /**
+     * 交换两个快捷栏的数据
+     */
+    public static void swapHotbars(int index1, int index2) {
+        if (index1 < 0 || index1 >= hotbars.size() || index2 < 0 || index2 >= hotbars.size()) {
+            return;
+        }
+        
+        // 交换快捷栏物品
+        List<ItemStack> tempHotbar = new ArrayList<>(hotbars.get(index1));
+        hotbars.set(index1, hotbars.get(index2));
+        hotbars.set(index2, tempHotbar);
+        
+        // 交换副手物品
+        ItemStack tempOffhand = offhandSlots.get(index1).copy();
+        offhandSlots.set(index1, offhandSlots.get(index2).copy());
+        offhandSlots.set(index2, tempOffhand);
+        
+        // 如果交换的快捷栏中有当前正在使用的，需要同步到玩家背包
+        Minecraft minecraft = Minecraft.getInstance();
+        Player player = minecraft.player;
+        if (player != null) {
+            if (index1 == currentHotbarIndex || index2 == currentHotbarIndex) {
+                loadHotbarToPlayer(currentHotbarIndex);
+            }
+        }
+    }
+    
+    /**
+     * 清空所有快捷栏数据（用于重新加载）
+     */
+    public static void clearAllHotbars() {
+        hotbars.clear();
+        offhandSlots.clear();
+        currentHotbarIndex = 0;
+    }
+    
     public static int getCurrentHotbarIndex() {
         return currentHotbarIndex;
     }
     
     public static void setCurrentHotbarIndex(int index) {
-        if (index >= 0 && index < HOTBAR_COUNT && index != currentHotbarIndex) {
+        // 获取最大快捷栏数量（从GUI获取，默认9）
+        int maxHotbars = getMaxHotbars();
+        
+        if (index >= 0 && index < maxHotbars && index != currentHotbarIndex) {
             Minecraft minecraft = Minecraft.getInstance();
             Player player = minecraft.player;
             if (player == null) return;
@@ -98,22 +189,38 @@ public class HotbarManager {
             // 更新索引
             currentHotbarIndex = index;
             
-            // 加载新快捷栏到玩家背包
+            // 加载新快捷栏到玩家背包（所有快捷栏都加载到玩家背包）
             loadHotbarToPlayer(index);
-            markDirty();
             
             // 调试输出
             System.out.println("[HotbarExpand] Switched to hotbar " + (index + 1));
         }
     }
     
+    /**
+     * 获取最大快捷栏数量
+     */
+    private static int getMaxHotbars() {
+        // 从HotbarInventoryScreen获取最大快捷栏数量
+        try {
+            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
+            java.lang.reflect.Field field = guiClass.getDeclaredField("maxHotbars");
+            field.setAccessible(true);
+            return (int) field.get(null);
+        } catch (Exception e) {
+            return 9; // 默认9个
+        }
+    }
+    
     public static void scrollToNext() {
-        int nextIndex = (currentHotbarIndex + 1) % HOTBAR_COUNT;
+        int maxHotbars = getMaxHotbars();
+        int nextIndex = (currentHotbarIndex + 1) % maxHotbars;
         setCurrentHotbarIndex(nextIndex);
     }
     
     public static void scrollToPrevious() {
-        int prevIndex = (currentHotbarIndex - 1 + HOTBAR_COUNT) % HOTBAR_COUNT;
+        int maxHotbars = getMaxHotbars();
+        int prevIndex = (currentHotbarIndex - 1 + maxHotbars) % maxHotbars;
         setCurrentHotbarIndex(prevIndex);
     }
     
@@ -122,16 +229,21 @@ public class HotbarManager {
         Player player = minecraft.player;
         if (player == null) return;
         
-        List<ItemStack> hotbar = hotbars[index];
+        // 确保索引有效
+        if (index < 0) return;
+        
+        // 确保快捷栏存在
+        ensureHotbarExists(index);
+        
+        List<ItemStack> hotbar = hotbars.get(index);
         System.out.println("[HotbarExpand] Saving player inventory to hotbar " + (index + 1));
-        for (int i = 0; i < SLOTS_PER_HOTBAR; i++) {
+        for (int i = 0; i < 9; i++) {
             ItemStack item = player.getInventory().getItem(i);
             System.out.println("[HotbarExpand] Slot " + i + ": " + item.getItem().getDescription().getString() + " x" + item.getCount());
             hotbar.set(i, item.copy());
         }
         // 保存副手物品
-        offhandSlots[index] = player.getOffhandItem().copy();
-        markDirty();
+        offhandSlots.set(index, player.getOffhandItem().copy());
     }
     
     private static void loadHotbarToPlayer(int index) {
@@ -139,15 +251,21 @@ public class HotbarManager {
         Player player = minecraft.player;
         if (player == null) return;
         
-        List<ItemStack> hotbar = hotbars[index];
+        // 确保索引有效
+        if (index < 0) return;
+        
+        // 确保快捷栏存在
+        ensureHotbarExists(index);
+        
+        List<ItemStack> hotbar = hotbars.get(index);
         System.out.println("[HotbarExpand] Loading hotbar " + (index + 1) + " to player");
-        for (int i = 0; i < SLOTS_PER_HOTBAR; i++) {
+        for (int i = 0; i < 9; i++) {
             ItemStack item = hotbar.get(i);
             System.out.println("[HotbarExpand] Slot " + i + ": " + item.getItem().getDescription().getString() + " x" + item.getCount());
             player.getInventory().setItem(i, item.copy());
         }
         // 加载副手物品
-        player.getInventory().offhand.set(0, offhandSlots[index].copy());
+        player.getInventory().offhand.set(0, offhandSlots.get(index).copy());
         System.out.println("[HotbarExpand] Hotbar loaded, switchCooldown = " + switchCooldown);
     }
     
@@ -162,18 +280,6 @@ public class HotbarManager {
     public static void setExpanded(boolean expanded) {
         isExpanded = expanded;
     }
-
-    @SubscribeEvent
-    public static void onPlayerLogin(ClientPlayerNetworkEvent.LoggingIn event) {
-        loadStateFromDisk();
-        savePlayerInventoryToCurrentHotbar();
-    }
-
-    @SubscribeEvent
-    public static void onPlayerLogout(ClientPlayerNetworkEvent.LoggingOut event) {
-        savePlayerInventoryToCurrentHotbar();
-        saveStateToDisk();
-    }
     
     public static float getSmoothProgress(float progress) {
         if (progress >= 1.0f) return 1.0f;
@@ -186,13 +292,6 @@ public class HotbarManager {
         Minecraft minecraft = Minecraft.getInstance();
         Player player = minecraft.player;
         if (player == null) return;
-
-        if (dirty) {
-            autoSaveCooldown--;
-            if (autoSaveCooldown <= 0) {
-                saveStateToDisk();
-            }
-        }
         
         // 减少切换冷却
         if (switchCooldown > 0) {
@@ -202,113 +301,22 @@ public class HotbarManager {
         
         // 每5 tick同步一次
         if (minecraft.level != null && minecraft.level.getGameTime() % 5 == 0) {
-            // 同步当前快捷栏
-            List<ItemStack> currentHotbar = hotbars[currentHotbarIndex];
-            for (int i = 0; i < SLOTS_PER_HOTBAR; i++) {
+            // 确保当前索引的快捷栏存在
+            ensureHotbarExists(currentHotbarIndex);
+            
+            // 同步当前快捷栏（所有索引都需要同步）
+            List<ItemStack> currentHotbar = hotbars.get(currentHotbarIndex);
+            for (int i = 0; i < 9; i++) {
                 ItemStack playerItem = player.getInventory().getItem(i);
                 if (!ItemStack.matches(currentHotbar.get(i), playerItem)) {
                     currentHotbar.set(i, playerItem.copy());
-                    markDirty();
                 }
             }
             // 同步副手物品
             ItemStack playerOffhand = player.getOffhandItem();
-            if (!ItemStack.matches(offhandSlots[currentHotbarIndex], playerOffhand)) {
-                offhandSlots[currentHotbarIndex] = playerOffhand.copy();
-                markDirty();
+            if (!ItemStack.matches(offhandSlots.get(currentHotbarIndex), playerOffhand)) {
+                offhandSlots.set(currentHotbarIndex, playerOffhand.copy());
             }
-            
-            // 在展开状态下，同步所有非当前快捷栏的物品（用于显示更新）
-            if (isExpanded) {
-                for (int h = 0; h < 9; h++) {
-                    if (h == currentHotbarIndex) continue; // 跳过当前快捷栏
-                    
-                    // 这里我们只是读取数据，不需要实际同步到玩家背包
-                    // 因为非当前快捷栏的物品存储在 hotbars 数组中
-                    // 当玩家打开背包GUI时，可以通过GUI修改这些物品
-                }
-            }
-        }
-    }
-
-    private static void markDirty() {
-        dirty = true;
-        autoSaveCooldown = AUTO_SAVE_INTERVAL;
-    }
-
-    private static Path getStatePath() {
-        return Minecraft.getInstance().gameDirectory.toPath()
-                .resolve("config")
-                .resolve("hotbarexpand-state.dat");
-    }
-
-    private static void loadStateFromDisk() {
-        Path statePath = getStatePath();
-        if (!Files.exists(statePath)) {
-            return;
-        }
-
-        try {
-            CompoundTag root = NbtIo.readCompressed(statePath, NbtAccounter.unlimitedHeap());
-            if (root == null) {
-                return;
-            }
-
-            currentHotbarIndex = Math.max(0, Math.min(HOTBAR_COUNT - 1, root.getInt("currentHotbarIndex")));
-            for (int i = 0; i < HOTBAR_COUNT; i++) {
-                CompoundTag hotbarTag = root.getCompound("hotbar_" + i);
-                NonNullList<ItemStack> loadedHotbar = NonNullList.withSize(SLOTS_PER_HOTBAR, ItemStack.EMPTY);
-                ContainerHelper.loadAllItems(hotbarTag, loadedHotbar, Minecraft.getInstance().player.registryAccess());
-
-                for (int slot = 0; slot < SLOTS_PER_HOTBAR; slot++) {
-                    hotbars[i].set(slot, loadedHotbar.get(slot).copy());
-                }
-
-                CompoundTag offhandTag = root.getCompound("offhand_" + i);
-                NonNullList<ItemStack> loadedOffhand = NonNullList.withSize(1, ItemStack.EMPTY);
-                ContainerHelper.loadAllItems(offhandTag, loadedOffhand, Minecraft.getInstance().player.registryAccess());
-                offhandSlots[i] = loadedOffhand.getFirst().copy();
-            }
-
-            dirty = false;
-            autoSaveCooldown = AUTO_SAVE_INTERVAL;
-            System.out.println("[HotbarExpand] Loaded hotbar state from " + statePath);
-        } catch (IOException exception) {
-            System.out.println("[HotbarExpand] Failed to load hotbar state: " + exception.getMessage());
-        }
-    }
-
-    private static void saveStateToDisk() {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.player == null) {
-            return;
-        }
-
-        Path statePath = getStatePath();
-        try {
-            Files.createDirectories(statePath.getParent());
-
-            CompoundTag root = new CompoundTag();
-            root.putInt("currentHotbarIndex", currentHotbarIndex);
-
-            for (int i = 0; i < HOTBAR_COUNT; i++) {
-                NonNullList<ItemStack> hotbarToSave = NonNullList.withSize(SLOTS_PER_HOTBAR, ItemStack.EMPTY);
-                for (int slot = 0; slot < SLOTS_PER_HOTBAR; slot++) {
-                    hotbarToSave.set(slot, hotbars[i].get(slot).copy());
-                }
-                root.put("hotbar_" + i, ContainerHelper.saveAllItems(new CompoundTag(), hotbarToSave, minecraft.player.registryAccess()));
-
-                NonNullList<ItemStack> offhandToSave = NonNullList.withSize(1, ItemStack.EMPTY);
-                offhandToSave.set(0, offhandSlots[i].copy());
-                root.put("offhand_" + i, ContainerHelper.saveAllItems(new CompoundTag(), offhandToSave, minecraft.player.registryAccess()));
-            }
-
-            NbtIo.writeCompressed(root, statePath);
-            dirty = false;
-            autoSaveCooldown = AUTO_SAVE_INTERVAL;
-            System.out.println("[HotbarExpand] Saved hotbar state to " + statePath);
-        } catch (IOException exception) {
-            System.out.println("[HotbarExpand] Failed to save hotbar state: " + exception.getMessage());
         }
     }
 }

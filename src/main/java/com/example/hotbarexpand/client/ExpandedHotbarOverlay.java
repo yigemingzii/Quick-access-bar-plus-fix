@@ -1,8 +1,6 @@
 package com.example.hotbarexpand.client;
 
-import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.blaze3d.systems.RenderSystem;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
@@ -28,9 +26,6 @@ public class ExpandedHotbarOverlay {
     private static final float EXPAND_SPEED = 0.12f;
     private static boolean isExpanding = false;
     private static boolean targetExpanded = false;
-    
-    // 列表中选中的格子索引（0-8）
-    private static int selectedSlotInList = 0;
 
     public static boolean isExpanded() {
         return HotbarManager.isExpanded();
@@ -94,25 +89,21 @@ public class ExpandedHotbarOverlay {
         handleNumberKeys();
     }
 
+    // 在ClientTick中检测按键（用于非取消性操作）
+    private static boolean[] keyWasDown = new boolean[10]; // 0-9
+    
     private static void handleNumberKeys() {
-        // 只在展开状态下处理（不按Alt时选择列表格子）
+        // 只在展开状态下处理
         if (!isExpanded() && !isExpanding) return;
         if (expandProgress < 0.3f) return;
         
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null) return;
-
-        boolean canSelectListEntry = minecraft.screen == null && !Screen.hasAltDown();
-        for (int i = 0; i < 9; i++) {
-            KeyMapping mapping = ClientSetup.getHotbarKey(i);
-            if (mapping == null) continue;
-
-            while (mapping.consumeClick()) {
-                if (canSelectListEntry) {
-                    selectedSlotInList = i;
-                    System.out.println("[HotbarExpand] Selected slot in list: " + (i + 1));
-                }
-            }
+        
+        // 只更新keyWasDown状态，不再处理列表格子选择（避免黄框问题）
+        for (int i = 1; i <= 9; i++) {
+            int keyCode = 48 + i;
+            keyWasDown[i] = org.lwjgl.glfw.GLFW.glfwGetKey(minecraft.getWindow().getWindow(), keyCode) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
         }
     }
     
@@ -122,17 +113,46 @@ public class ExpandedHotbarOverlay {
         // 只在展开状态下处理
         if (!isExpanded() && !isExpanding) return;
         if (expandProgress < 0.3f) return;
-
-        if (!Screen.hasAltDown()) return;
-
-        for (int i = 0; i < 9; i++) {
-            KeyMapping mapping = ClientSetup.getHotbarKey(i);
-            if (matchesKeyMapping(event, mapping)) {
-                System.out.println("[HotbarExpand] Alt+Hotbar key: " + (i + 1) + ", switching hotbar");
-                setCurrentHotbarIndex(i);
-                selectedSlotInList = i;
-                cancelInputEvent(event);
-                break;
+        
+        int key = event.getKey();
+        // 数字键1-9 (GLFW_KEY_1 = 49)
+        if (key >= 49 && key <= 57) {
+            // 检查是否按下了Alt键
+            if (Screen.hasAltDown()) {
+                // 获取当前滚动偏移和实际快捷栏数量
+                int scrollOffset = getScrollOffsetFromGUI();
+                int maxHotbars = getMaxHotbarsFromGUI();
+                int visibleHotbars = Math.min(9, maxHotbars - scrollOffset);
+                
+                // 获取按下的数字键在可见列表中的位置（0-8）
+                int visibleIndex = key - 49; // 0-8
+                
+                // 检查是否在可见范围内
+                if (visibleIndex < visibleHotbars) {
+                    // 计算实际的快捷栏索引
+                    int targetIndex = scrollOffset + visibleIndex;
+                    System.out.println("[HotbarExpand] Alt+Number key: " + (visibleIndex + 1) + " in visible list, actual hotbar: " + (targetIndex + 1));
+                    setCurrentHotbarIndex(targetIndex);
+                    // 不设置selectedSlotInList，避免黄框残留
+                }
+                
+                // 取消事件，阻止原版物品选择
+                try {
+                    java.lang.reflect.Method method = event.getClass().getMethod("setCanceled", boolean.class);
+                    method.invoke(event, true);
+                } catch (Exception e) {
+                }
+            } else {
+                // 不按Alt时，如果展开状态，也取消数字键事件，防止影响物品栏
+                // 但只在游戏界面（没有打开其他屏幕）时处理
+                Minecraft minecraft = Minecraft.getInstance();
+                if (minecraft.screen == null) {
+                    try {
+                        java.lang.reflect.Method method = event.getClass().getMethod("setCanceled", boolean.class);
+                        method.invoke(event, true);
+                    } catch (Exception e) {
+                    }
+                }
             }
         }
     }
@@ -149,24 +169,29 @@ public class ExpandedHotbarOverlay {
         
         int selectedSlot = minecraft.player.getInventory().selected;
         
+        // 获取快捷栏数量和滚动偏移
+        int maxHotbars = getMaxHotbarsFromGUI();
+        int scrollOffset = getScrollOffsetFromGUI();
+        
         if (Screen.hasAltDown()) {
             // 按住Alt时切换快捷栏
             int currentIndex = getCurrentHotbarIndex();
             int newIndex;
             if (scrollDelta > 0) {
-                newIndex = (currentIndex - 1 + 9) % 9;
+                newIndex = currentIndex - 1;
+                if (newIndex < 0) newIndex = maxHotbars - 1;
             } else {
-                newIndex = (currentIndex + 1) % 9;
+                newIndex = currentIndex + 1;
+                if (newIndex >= maxHotbars) newIndex = 0;
             }
             System.out.println("[HotbarExpand] Mouse scroll switching to hotbar: " + (newIndex + 1));
             setCurrentHotbarIndex(newIndex);
-            selectedSlotInList = newIndex; // 更新选中的列表格子
+
+            // 自动调整滚动偏移，确保选中的快捷栏可见
+            autoAdjustScrollOffset(newIndex, maxHotbars);
+
             // 取消事件，阻止原版滚轮行为
-            try {
-                java.lang.reflect.Method method = event.getClass().getMethod("setCanceled", boolean.class);
-                method.invoke(event, true);
-            } catch (Exception e) {
-            }
+            event.setCanceled(true);
         } else {
             // 不按Alt时：如果滚到尽头，自动切换快捷栏
             boolean shouldSwitchHotbar = false;
@@ -176,49 +201,61 @@ public class ExpandedHotbarOverlay {
             if (scrollDelta > 0 && selectedSlot == 0) {
                 // 向上滚且当前在第一个槽位，切换到上一个快捷栏的最后一个槽位
                 shouldSwitchHotbar = true;
-                newHotbarIndex = (getCurrentHotbarIndex() - 1 + 9) % 9;
+                newHotbarIndex = getCurrentHotbarIndex() - 1;
+                if (newHotbarIndex < 0) newHotbarIndex = maxHotbars - 1;
                 newSlot = 8;
             } else if (scrollDelta < 0 && selectedSlot == 8) {
                 // 向下滚且当前在最后一个槽位，切换到下一个快捷栏的第一个槽位
                 shouldSwitchHotbar = true;
-                newHotbarIndex = (getCurrentHotbarIndex() + 1) % 9;
+                newHotbarIndex = getCurrentHotbarIndex() + 1;
+                if (newHotbarIndex >= maxHotbars) newHotbarIndex = 0;
                 newSlot = 0;
             }
             
             if (shouldSwitchHotbar) {
                 System.out.println("[HotbarExpand] Auto switching to hotbar: " + (newHotbarIndex + 1) + ", slot: " + newSlot);
                 setCurrentHotbarIndex(newHotbarIndex);
-                selectedSlotInList = newHotbarIndex;
                 minecraft.player.getInventory().selected = newSlot;
+                
+                // 自动调整滚动偏移，确保选中的快捷栏可见
+                autoAdjustScrollOffset(newHotbarIndex, maxHotbars);
+                
                 // 取消事件，阻止原版滚轮行为
-                try {
-                    java.lang.reflect.Method method = event.getClass().getMethod("setCanceled", boolean.class);
-                    method.invoke(event, true);
-                } catch (Exception e) {
-                }
+                event.setCanceled(true);
             }
             // 其他情况让原版滚轮正常工作
         }
     }
-
-    private static boolean matchesKeyMapping(InputEvent.Key event, KeyMapping mapping) {
-        if (mapping == null) return false;
-
-        InputConstants.Key boundKey = mapping.getKey();
-        if (boundKey.getType() == InputConstants.Type.KEYSYM) {
-            return event.getKey() == boundKey.getValue();
+    
+    /**
+     * 自动调整滚动偏移，确保指定的快捷栏在可见区域内
+     */
+    private static void autoAdjustScrollOffset(int hotbarIndex, int maxHotbars) {
+        if (maxHotbars <= 9) return; // 不需要滚动
+        
+        int scrollOffset = getScrollOffsetFromGUI();
+        int visibleHotbars = 9;
+        
+        // 如果选中的快捷栏在可见区域上方，向上滚动
+        if (hotbarIndex < scrollOffset) {
+            setScrollOffsetToGUI(hotbarIndex);
         }
-        if (boundKey.getType() == InputConstants.Type.SCANCODE) {
-            return event.getScanCode() == boundKey.getValue();
+        // 如果选中的快捷栏在可见区域下方，向下滚动
+        else if (hotbarIndex >= scrollOffset + visibleHotbars) {
+            setScrollOffsetToGUI(hotbarIndex - visibleHotbars + 1);
         }
-        return false;
     }
-
-    private static void cancelInputEvent(Object event) {
+    
+    /**
+     * 设置滚动偏移到HotbarInventoryScreen
+     */
+    private static void setScrollOffsetToGUI(int offset) {
         try {
-            java.lang.reflect.Method method = event.getClass().getMethod("setCanceled", boolean.class);
-            method.invoke(event, true);
-        } catch (Exception ignored) {
+            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
+            java.lang.reflect.Method method = guiClass.getMethod("setScrollOffset", int.class);
+            method.invoke(null, offset);
+        } catch (Exception e) {
+            // 忽略错误
         }
     }
 
@@ -253,13 +290,80 @@ public class ExpandedHotbarOverlay {
         int currentIndex = getCurrentHotbarIndex();
         float smoothExpandProgress = HotbarManager.getSmoothProgress(expandProgress);
         
-        // 只渲染右下角的9个快捷栏列表（垂直排列，固定1-9顺序）
+        // 在原版快捷栏和副手框之间渲染白条（显示当前在列表中的位置）
+        if (smoothExpandProgress > 0.01f) {
+            renderPositionIndicator(guiGraphics, minecraft, screenWidth, screenHeight, hotbarWidth, hotbarHeight, offhandWidth, currentIndex, smoothExpandProgress);
+        }
+        
+        // 只渲染右下角的快捷栏列表（垂直排列，固定1-9顺序）
         // 不再渲染主快捷栏复制，保留原版快捷栏
         if (smoothExpandProgress > 0.01f) {
             renderHotbarListAtBottomRight(guiGraphics, minecraft, screenWidth, screenHeight, hotbarWidth, hotbarHeight, offhandWidth, currentIndex, smoothExpandProgress);
         }
         
         RenderSystem.disableBlend();
+    }
+    
+    /**
+     * 在原版快捷栏和副手框之间渲染白条指示器
+     * 显示当前快捷栏在列表中的位置
+     * 限宽6格，纵向无限排列（即每列6个，向右新开列）
+     */
+    private static void renderPositionIndicator(GuiGraphics guiGraphics, Minecraft minecraft, int screenWidth, int screenHeight, int hotbarWidth, int hotbarHeight, int offhandWidth, int currentIndex, float smoothExpandProgress) {
+        boolean isLeftHanded = minecraft.options.mainHand().get() == net.minecraft.world.entity.HumanoidArm.LEFT;
+        
+        int centerX = screenWidth / 2;
+        int baseY = screenHeight - hotbarHeight;
+        
+        // 获取实际快捷栏数量
+        int maxHotbars = getMaxHotbarsFromGUI();
+        
+        // 白条的位置：在快捷栏和副手框之间
+        int barWidth = 4; // 白条宽度
+        int barHeight = 3; // 每个小段高度
+        int barGapX = 2; // 横向间隔
+        int barGapY = 1; // 纵向间隔
+        int gap = 2; // 与快捷栏/副手框的间隙
+        int maxPerCol = 6; // 每列最多6格
+        
+        // 计算需要多少列
+        int numCols = (maxHotbars + maxPerCol - 1) / maxPerCol; // 向上取整
+        
+        // 计算白条区域的总宽度
+        int totalWidth = numCols * barWidth + (numCols - 1) * barGapX;
+        
+        int baseBarX;
+        if (isLeftHanded) {
+            // 左手模式：副手在右边，白条在快捷栏右侧
+            baseBarX = centerX + hotbarWidth / 2 + gap;
+        } else {
+            // 右手模式：副手在左边，白条在副手框右侧（即快捷栏左侧）
+            // 从右向左排列，最右边是第一列
+            baseBarX = centerX - hotbarWidth / 2 - offhandWidth - gap - totalWidth;
+        }
+        
+        // 计算起始Y位置（垂直居中）
+        int colHeight = maxPerCol * barHeight + (maxPerCol - 1) * barGapY;
+        int startY = baseY + (hotbarHeight - colHeight) / 2;
+        
+        // 渲染所有小段（按列渲染，纵向排列）
+        for (int i = 0; i < maxHotbars; i++) {
+            int col = i / maxPerCol; // 列索引
+            int row = i % maxPerCol; // 行索引
+            
+            int barX;
+            if (isLeftHanded) {
+                // 左手模式：从左向右排列列
+                barX = baseBarX + col * (barWidth + barGapX);
+            } else {
+                // 右手模式：从左向右排列列（最右边是第一列）
+                barX = baseBarX + col * (barWidth + barGapX);
+            }
+            
+            int segmentY = startY + row * (barHeight + barGapY);
+            int color = (i == currentIndex) ? 0xFFFFFFFF : 0xFF808080; // 当前位置白色，其他灰色
+            guiGraphics.fill(barX, segmentY, barX + barWidth, segmentY + barHeight, color);
+        }
     }
     
     // 渲染主快捷栏（带副手格和编号）
@@ -301,34 +405,40 @@ public class ExpandedHotbarOverlay {
         renderItems(guiGraphics, centerX - hotbarWidth / 2, baseY, currentIdx);
     }
     
-    // 在屏幕右下角渲染9个快捷栏列表（垂直排列，固定1-9顺序，从上到下）
+    // 在屏幕右下角渲染快捷栏列表（垂直排列，固定1-9顺序，从上到下）
+    // 最多显示9个，超过9个时通过滚动查看
     private static void renderHotbarListAtBottomRight(GuiGraphics guiGraphics, Minecraft minecraft, int screenWidth, int screenHeight, int hotbarWidth, int hotbarHeight, int offhandWidth, int currentIndex, float smoothExpandProgress) {
         boolean isLeftHanded = minecraft.options.mainHand().get() == net.minecraft.world.entity.HumanoidArm.LEFT;
         
         // 计算起始位置（绝对右下角，紧贴右边缘）
         int listCenterX = screenWidth - hotbarWidth / 2;
         
+        // 获取实际快捷栏数量和滚动偏移
+        int maxHotbars = getMaxHotbarsFromGUI();
+        int scrollOffset = getScrollOffsetFromGUI();
+        int visibleHotbars = Math.min(9, maxHotbars);
+        
         // 固定1-9顺序，从上到下排列
-        // 第1个在最上面，第9个在最下面（靠近屏幕底部）
-        for (int i = 0; i < 9; i++) {
-            // 从上到下：i=0在最上面，i=8在最下面
-            int slotInList = i;
+        // 根据滚动偏移显示不同的9个快捷栏
+        for (int displayIdx = 0; displayIdx < visibleHotbars; displayIdx++) {
+            int actualIdx = scrollOffset + displayIdx; // 实际的快捷栏索引
+            if (actualIdx >= maxHotbars) break;
+            
+            // 从上到下：displayIdx=0在最上面
             // 从屏幕底部开始计算位置（右下角）
-            // 第9个(i=8)在最下面，第1个(i=0)在最上面
-            int targetY = screenHeight - (9 - slotInList) * hotbarHeight;
+            int targetY = screenHeight - (visibleHotbars - displayIdx) * hotbarHeight;
             
             // 动画：从下方滑入（延迟效果：下面的先出现）
-            float slotProgress = Math.min(1.0f, Math.max(0.0f, smoothExpandProgress * 1.5f - (8 - slotInList) * 0.08f));
+            float slotProgress = Math.min(1.0f, Math.max(0.0f, smoothExpandProgress * 1.5f - (visibleHotbars - 1 - displayIdx) * 0.08f));
             int startY = screenHeight + hotbarHeight;
             int renderY = (int) (startY + (targetY - startY) * HotbarManager.getSmoothProgress(slotProgress));
             
             int offhandYOffset = 0;
             int itemXOffset = 3;
             
-            // 当前快捷栏（currentIndex）和选中的列表格子（selectedSlotInList）都用黄色高亮
-            boolean isCurrentHotbar = (i == currentIndex);
-            boolean isSelectedSlot = (i == selectedSlotInList);
-            boolean isHighlighted = isCurrentHotbar || isSelectedSlot;
+            // 只有当前快捷栏（currentIndex）用黄色高亮
+            boolean isCurrentHotbar = (actualIdx == currentIndex);
+            boolean isHighlighted = isCurrentHotbar;
 
             // 渲染副手格（高亮项用黄色）
             if (isHighlighted) {
@@ -352,20 +462,78 @@ public class ExpandedHotbarOverlay {
             
             // 渲染编号（白色，高亮项用黄色）
             int numberColor = isHighlighted ? 0xFFFF00 : 0xFFFFFF;
-            int numberX = isLeftHanded ? listCenterX + hotbarWidth / 2 + 27 : listCenterX - hotbarWidth / 2 - 37;
-            guiGraphics.drawString(minecraft.font, String.valueOf(i + 1), numberX, renderY + 6, numberColor);
+            String numberStr = String.valueOf(actualIdx + 1);
+            // 2位数居中渲染 - 编号在副手格左侧，居中显示
+            int textWidth = minecraft.font.width(numberStr);
+            // 副手格宽度29，编号在副手格左侧，向左90像素
+            int numberXOffset = isLeftHanded ? 27 + (14 - textWidth) / 2 : -29 - 14 - 190 + (14 - textWidth) / 2;
+            guiGraphics.drawString(minecraft.font, numberStr, listCenterX + hotbarWidth / 2 + numberXOffset, renderY + 6, numberColor);
             
             // 渲染物品
-            renderItems(guiGraphics, listCenterX - hotbarWidth / 2, renderY, i);
+            renderItems(guiGraphics, listCenterX - hotbarWidth / 2, renderY, actualIdx);
             
             // 渲染副手物品
-            renderOffhandItem(guiGraphics, minecraft, listCenterX, renderY, hotbarWidth, offhandWidth, isLeftHanded, itemXOffset, offhandYOffset, i);
+            renderOffhandItem(guiGraphics, minecraft, listCenterX, renderY, hotbarWidth, offhandWidth, isLeftHanded, itemXOffset, offhandYOffset, actualIdx);
             
             // 如果是当前快捷栏，渲染选中框（显示当前选中的物品槽位）
             if (isCurrentHotbar) {
                 int selectedSlot = minecraft.player.getInventory().selected;
                 renderHotbarSelection(guiGraphics, listCenterX - hotbarWidth / 2, renderY, selectedSlot);
             }
+        }
+        
+        // 如果快捷栏数量超过9个，渲染滚动指示器（小白条）
+        if (maxHotbars > 9) {
+            renderScrollIndicator(guiGraphics, screenWidth, screenHeight, hotbarHeight, scrollOffset, maxHotbars, visibleHotbars, smoothExpandProgress);
+        }
+    }
+    
+    /**
+     * 渲染滚动指示器（小白条）
+     */
+    private static void renderScrollIndicator(GuiGraphics guiGraphics, int screenWidth, int screenHeight, int hotbarHeight, int scrollOffset, int maxHotbars, int visibleHotbars, float smoothExpandProgress) {
+        // 滚动指示器位置：在快捷栏列表的左侧，往右2像素
+        int indicatorX = screenWidth - 182 - 8 - 4 + 10 - 5 + 2; // 快捷栏左侧留出空间，往右2像素
+        int listHeight = visibleHotbars * hotbarHeight;
+        int startY = screenHeight - listHeight;
+        
+        // 计算指示器高度和位置
+        float ratio = (float) visibleHotbars / maxHotbars;
+        int indicatorHeight = Math.max(8, (int)(listHeight * ratio));
+        int maxScroll = maxHotbars - visibleHotbars;
+        float scrollRatio = maxScroll > 0 ? (float) scrollOffset / maxScroll : 0;
+        int indicatorY = startY + (int)((listHeight - indicatorHeight) * scrollRatio);
+        
+        // 渲染指示器背景（灰色）
+        guiGraphics.fill(indicatorX, startY, indicatorX + 3, startY + listHeight, 0x40808080);
+        // 渲染指示器滑块（白色）
+        guiGraphics.fill(indicatorX, indicatorY, indicatorX + 3, indicatorY + indicatorHeight, 0xFFFFFFFF);
+    }
+    
+    /**
+     * 从HotbarInventoryScreen获取滚动偏移
+     */
+    private static int getScrollOffsetFromGUI() {
+        try {
+            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
+            java.lang.reflect.Method method = guiClass.getMethod("getScrollOffset");
+            return (int) method.invoke(null);
+        } catch (Exception e) {
+            return 0; // 默认从0开始
+        }
+    }
+    
+    /**
+     * 从HotbarInventoryScreen获取最大快捷栏数量
+     */
+    private static int getMaxHotbarsFromGUI() {
+        try {
+            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
+            java.lang.reflect.Field field = guiClass.getDeclaredField("maxHotbars");
+            field.setAccessible(true);
+            return (int) field.get(null);
+        } catch (Exception e) {
+            return 9; // 默认9个
         }
     }
     
