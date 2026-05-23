@@ -63,6 +63,7 @@ public class HotbarInventoryScreen {
     private static ItemStack draggedItem = ItemStack.EMPTY;
     private static int dragButton = -1;
     private static List<int[]> draggedSlots = new ArrayList<>(); // 记录已经分发过的槽位 [hotbarIdx, slotIdx]
+    private static List<ItemStack> draggedSlotOriginalItems = new ArrayList<>();
 
     @SubscribeEvent
     public static void onScreenInit(ScreenEvent.Init.Post event) {
@@ -74,6 +75,7 @@ public class HotbarInventoryScreen {
         
         // 每次打开背包都重新计算位置
         recalculatePanelPosition(screen);
+        syncHotbarCountFromManager();
         
         // 初始化快捷栏列表（如果为空）
         initHotbarList();
@@ -121,6 +123,7 @@ public class HotbarInventoryScreen {
     public static void onScreenClose(ScreenEvent.Closing event) {
         isPanelVisible = false;
         isDraggingScrollbar = false;
+        clearDragState();
     }
 
     
@@ -141,6 +144,7 @@ public class HotbarInventoryScreen {
         
         // 实时获取当前高亮索引，确保与HotbarManager同步
         currentHotbarIndexCache = HotbarManager.getCurrentHotbarIndex();
+        syncHotbarCountFromManager();
         
         RenderSystem.enableBlend();
         RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -625,10 +629,7 @@ public class HotbarInventoryScreen {
         // 结束物品拖动
         if (isDraggingItems && event.getButton() == dragButton) {
             System.out.println("[HotbarExpand] Ended dragging, distributed to " + draggedSlots.size() + " slots");
-            isDraggingItems = false;
-            draggedItem = ItemStack.EMPTY;
-            dragButton = -1;
-            draggedSlots.clear();
+            clearDragState();
             
             // 如果在面板区域内，取消事件防止丢出物品
             if (inPanelArea) {
@@ -746,23 +747,18 @@ public class HotbarInventoryScreen {
         
         ItemStack carriedItem = minecraft.player.containerMenu.getCarried();
         if (carriedItem.isEmpty()) {
-            isDraggingItems = false;
+            clearDragState();
             return;
         }
         
         ItemStack slotItem = getHotbarItem(hotbarIdx, slotIdx);
-        
-        // 记录这个槽位
-        draggedSlots.add(new int[]{hotbarIdx, slotIdx});
 
         if (dragButton == 0) {
-            // 左键拖动：立即处理每个槽位
-            // 第1个槽位：放下所有物品
-            // 第2个及以上槽位：平均分配到所有已拖动的槽位
-            if (draggedSlots.size() == 1) {
-                placeAllItems(hotbarIdx, slotIdx);
-            } else {
-                redistributeItemsEvenly();
+            if (!slotItem.isEmpty() && !ItemStack.isSameItemSameComponents(slotItem, draggedItem)) {
+                return;
+            }
+            if (!slotItem.isEmpty() && slotItem.getCount() >= slotItem.getMaxStackSize()) {
+                return;
             }
         } else if (dragButton == 1) {
             // 右键拖动：每个槽位放1个物品
@@ -774,6 +770,16 @@ public class HotbarInventoryScreen {
             if (!slotItem.isEmpty() && slotItem.getCount() >= slotItem.getMaxStackSize()) {
                 return;
             }
+        } else {
+            return;
+        }
+
+        draggedSlots.add(new int[]{hotbarIdx, slotIdx});
+        draggedSlotOriginalItems.add(slotItem.copy());
+
+        if (dragButton == 0) {
+            redistributeItemsEvenly();
+        } else {
             placeOneItem(hotbarIdx, slotIdx);
         }
     }
@@ -787,7 +793,7 @@ public class HotbarInventoryScreen {
 
         ItemStack carriedItem = minecraft.player.containerMenu.getCarried();
         if (carriedItem.isEmpty()) {
-            isDraggingItems = false;
+            clearDragState();
             return;
         }
 
@@ -800,7 +806,7 @@ public class HotbarInventoryScreen {
                 minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
             }
             minecraft.player.containerMenu.setCarried(ItemStack.EMPTY);
-            isDraggingItems = false;
+            clearDragState();
             System.out.println("[HotbarExpand] Left click placed all items to hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
         } else if (ItemStack.isSameItemSameComponents(slotItem, carriedItem)) {
             // 相同物品，尝试合并
@@ -820,7 +826,7 @@ public class HotbarInventoryScreen {
                 newCarried.shrink(toAdd);
                 if (newCarried.isEmpty()) {
                     newCarried = ItemStack.EMPTY;
-                    isDraggingItems = false;
+                    clearDragState();
                 }
                 minecraft.player.containerMenu.setCarried(newCarried);
                 System.out.println("[HotbarExpand] Left click merged " + toAdd + " items to hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
@@ -831,7 +837,7 @@ public class HotbarInventoryScreen {
                     minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
                 }
                 minecraft.player.containerMenu.setCarried(slotItem.copy());
-                isDraggingItems = false;
+                clearDragState();
                 System.out.println("[HotbarExpand] Left click swapped items at hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
             }
         } else {
@@ -841,7 +847,7 @@ public class HotbarInventoryScreen {
                 minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
             }
             minecraft.player.containerMenu.setCarried(slotItem.copy());
-            isDraggingItems = false;
+            clearDragState();
             System.out.println("[HotbarExpand] Left click swapped items at hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
         }
     }
@@ -856,28 +862,45 @@ public class HotbarInventoryScreen {
         
         ItemStack carriedItem = minecraft.player.containerMenu.getCarried();
         if (carriedItem.isEmpty()) {
-            isDraggingItems = false;
+            clearDragState();
             return;
         }
         
-        // 原版容器逻辑：总物品数 = 原始物品总数（保持不变）
-        // 每次添加新槽位时，重新计算每个槽位应该分配的数量
         int totalItems = draggedItem.getCount();
         int slotCount = draggedSlots.size();
         int baseAmount = totalItems / slotCount;
         int remainder = totalItems % slotCount;
+        int distributedCount = 0;
         
-        // 更新所有已分发槽位的物品数量
-        for (int i = 0; i < draggedSlots.size(); i++) {
+        for (int i = 0; i < slotCount; i++) {
             int[] slot = draggedSlots.get(i);
+            ItemStack originalStack = draggedSlotOriginalItems.get(i);
             int targetHotbarIdx = slot[0];
             int targetSlotIdx = slot[1];
-            
-            // 前remainder个槽位多分配1个
             int amount = baseAmount + (i < remainder ? 1 : 0);
-            
-            ItemStack newStack = draggedItem.copy();
-            newStack.setCount(amount);
+            ItemStack newStack;
+            int addedAmount;
+
+            if (originalStack.isEmpty()) {
+                addedAmount = Math.min(amount, draggedItem.getMaxStackSize());
+                if (addedAmount <= 0) {
+                    newStack = ItemStack.EMPTY;
+                } else {
+                    newStack = draggedItem.copy();
+                    newStack.setCount(addedAmount);
+                }
+            } else if (ItemStack.isSameItemSameComponents(originalStack, draggedItem)) {
+                int space = originalStack.getMaxStackSize() - originalStack.getCount();
+                addedAmount = Math.min(space, amount);
+                newStack = originalStack.copy();
+                if (addedAmount > 0) {
+                    newStack.grow(addedAmount);
+                }
+            } else {
+                continue;
+            }
+
+            distributedCount += addedAmount;
             setHotbarItem(targetHotbarIdx, targetSlotIdx, newStack);
             
             // 如果修改的是当前快捷栏，同步到玩家背包
@@ -885,26 +908,19 @@ public class HotbarInventoryScreen {
                 minecraft.player.getInventory().setItem(targetSlotIdx, newStack.copy());
             }
         }
-        
-        // 计算实际分配的物品总数
-        int distributedCount = 0;
-        for (int i = 0; i < slotCount; i++) {
-            distributedCount += baseAmount + (i < remainder ? 1 : 0);
-        }
-        
-        // 更新手持物品数量（剩余的物品）
-        int remainingItems = totalItems - distributedCount;
+
+        int remainingItems = Math.max(0, totalItems - distributedCount);
         ItemStack newCarried;
         if (remainingItems > 0) {
             newCarried = draggedItem.copy();
             newCarried.setCount(remainingItems);
         } else {
             newCarried = ItemStack.EMPTY;
-            isDraggingItems = false;
+            clearDragState();
         }
         minecraft.player.containerMenu.setCarried(newCarried);
         
-        System.out.println("[HotbarExpand] Left drag redistributed to " + draggedSlots.size() + " slots, base=" + baseAmount + ", remainder=" + remainder + ", remaining=" + remainingItems);
+        System.out.println("[HotbarExpand] Left drag redistributed to " + draggedSlots.size() + " slots, distributed=" + distributedCount + ", remaining=" + remainingItems);
     }
     
     /**
@@ -916,7 +932,7 @@ public class HotbarInventoryScreen {
         
         ItemStack carriedItem = minecraft.player.containerMenu.getCarried();
         if (carriedItem.isEmpty()) {
-            isDraggingItems = false;
+            clearDragState();
             return;
         }
         
@@ -942,7 +958,7 @@ public class HotbarInventoryScreen {
         newCarried.shrink(1);
         if (newCarried.isEmpty()) {
             newCarried = ItemStack.EMPTY;
-            isDraggingItems = false;
+            clearDragState();
         }
         minecraft.player.containerMenu.setCarried(newCarried);
         
@@ -970,8 +986,7 @@ public class HotbarInventoryScreen {
         if (hotbarCount < 27) { // 最多27个快捷栏
             // 使用HotbarManager添加快捷栏
             HotbarManager.addHotbar();
-            // 从HotbarManager获取最新的数量
-            maxHotbars = HotbarManager.getHotbarCount();
+            syncHotbarCountFromManager();
             
             // 播放音效
             Minecraft minecraft = Minecraft.getInstance();
@@ -997,8 +1012,7 @@ public class HotbarInventoryScreen {
             if (currentIdx >= 0 && currentIdx < hotbarCount) {
                 // 使用HotbarManager删除快捷栏
                 HotbarManager.removeHotbar(currentIdx);
-                // 从HotbarManager获取最新的数量
-                maxHotbars = HotbarManager.getHotbarCount();
+                syncHotbarCountFromManager();
                 currentHotbarIndexCache = HotbarManager.getCurrentHotbarIndex();
                 
                 // 调整滚动偏移 - 确保不会超出范围
@@ -1037,7 +1051,7 @@ public class HotbarInventoryScreen {
             // 交换当前快捷栏和上一个快捷栏的数据
             HotbarManager.swapHotbars(currentIdx, currentIdx - 1);
             // 更新当前选中的索引
-            HotbarManager.setCurrentHotbarIndex(currentIdx - 1);
+            HotbarManager.setCurrentHotbarIndex(currentIdx - 1, false);
             currentHotbarIndexCache = currentIdx - 1;
             
             // 调整滚动偏移
@@ -1063,7 +1077,7 @@ public class HotbarInventoryScreen {
             // 交换当前快捷栏和下一个快捷栏的数据
             HotbarManager.swapHotbars(currentIdx, currentIdx + 1);
             // 更新当前选中的索引
-            HotbarManager.setCurrentHotbarIndex(currentIdx + 1);
+            HotbarManager.setCurrentHotbarIndex(currentIdx + 1, false);
             currentHotbarIndexCache = currentIdx + 1;
             
             // 调整滚动偏移
@@ -1122,7 +1136,9 @@ public class HotbarInventoryScreen {
                 draggedItem = carriedItem.copy();
                 dragButton = button;
                 draggedSlots.clear();
+                draggedSlotOriginalItems.clear();
                 draggedSlots.add(new int[]{hotbarIdx, slotIdx});
+                draggedSlotOriginalItems.add(slotItem.copy());
 
                 // 立即处理第一个槽位
                 if (button == 0) {
@@ -1471,5 +1487,19 @@ public class HotbarInventoryScreen {
      */
     public static int getVisibleHotbars() {
         return VISIBLE_HOTBARS;
+    }
+
+    private static void syncHotbarCountFromManager() {
+        maxHotbars = Math.max(1, HotbarManager.getHotbarCount());
+        int maxScroll = Math.max(0, maxHotbars - VISIBLE_HOTBARS);
+        scrollOffset = Math.min(maxScroll, Math.max(0, scrollOffset));
+    }
+
+    private static void clearDragState() {
+        isDraggingItems = false;
+        draggedItem = ItemStack.EMPTY;
+        dragButton = -1;
+        draggedSlots.clear();
+        draggedSlotOriginalItems.clear();
     }
 }
