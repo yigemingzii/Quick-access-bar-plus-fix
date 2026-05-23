@@ -172,55 +172,55 @@ public class HotbarManager {
     }
     
     public static void setCurrentHotbarIndex(int index) {
-        // 获取最大快捷栏数量（从GUI获取，默认9）
-        int maxHotbars = getMaxHotbars();
-        
-        if (index >= 0 && index < maxHotbars && index != currentHotbarIndex) {
-            Minecraft minecraft = Minecraft.getInstance();
-            Player player = minecraft.player;
-            if (player == null) return;
-            
-            // 设置切换冷却，防止同步干扰（必须在保存前设置）
-            switchCooldown = 20;
-            
-            // 先保存当前快捷栏
-            savePlayerInventoryToHotbar(currentHotbarIndex);
-            
-            // 更新索引
-            currentHotbarIndex = index;
-            
-            // 加载新快捷栏到玩家背包（所有快捷栏都加载到玩家背包）
-            loadHotbarToPlayer(index);
-            
-            // 调试输出
-            System.out.println("[HotbarExpand] Switched to hotbar " + (index + 1));
-        }
+        setCurrentHotbarIndex(index, true);
     }
     
-    /**
-     * 获取最大快捷栏数量
-     */
-    private static int getMaxHotbars() {
-        // 从HotbarInventoryScreen获取最大快捷栏数量
-        try {
-            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
-            java.lang.reflect.Field field = guiClass.getDeclaredField("maxHotbars");
-            field.setAccessible(true);
-            return (int) field.get(null);
-        } catch (Exception e) {
-            return 9; // 默认9个
+    public static void setCurrentHotbarIndex(int index, boolean saveCurrentHotbar) {
+        int hotbarCount = getHotbarCount();
+        if (index < 0 || index >= hotbarCount || index == currentHotbarIndex) {
+            return;
         }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        Player player = minecraft.player;
+        if (player == null) return;
+        
+        // 设置切换冷却，防止同步干扰（必须在保存前设置）
+        switchCooldown = 20;
+        
+        if (saveCurrentHotbar) {
+            savePlayerInventoryToHotbar(currentHotbarIndex);
+        }
+        
+        currentHotbarIndex = index;
+        loadHotbarToPlayer(index);
+        System.out.println("[HotbarExpand] Switched to hotbar " + (index + 1));
+    }
+
+    public static void reloadCurrentHotbarToPlayer() {
+        if (currentHotbarIndex < 0 || currentHotbarIndex >= hotbars.size()) {
+            return;
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        Player player = minecraft.player;
+        if (player == null) return;
+
+        switchCooldown = 20;
+        loadHotbarToPlayer(currentHotbarIndex);
     }
     
     public static void scrollToNext() {
-        int maxHotbars = getMaxHotbars();
-        int nextIndex = (currentHotbarIndex + 1) % maxHotbars;
+        int hotbarCount = getHotbarCount();
+        if (hotbarCount <= 0) return;
+        int nextIndex = (currentHotbarIndex + 1) % hotbarCount;
         setCurrentHotbarIndex(nextIndex);
     }
     
     public static void scrollToPrevious() {
-        int maxHotbars = getMaxHotbars();
-        int prevIndex = (currentHotbarIndex - 1 + maxHotbars) % maxHotbars;
+        int hotbarCount = getHotbarCount();
+        if (hotbarCount <= 0) return;
+        int prevIndex = (currentHotbarIndex - 1 + hotbarCount) % hotbarCount;
         setCurrentHotbarIndex(prevIndex);
     }
     

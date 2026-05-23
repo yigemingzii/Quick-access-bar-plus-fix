@@ -1,5 +1,6 @@
 package com.example.hotbarexpand.client;
 
+import com.example.hotbarexpand.client.gui.HotbarInventoryScreen;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -514,27 +515,14 @@ public class ExpandedHotbarOverlay {
      * 从HotbarInventoryScreen获取滚动偏移
      */
     private static int getScrollOffsetFromGUI() {
-        try {
-            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
-            java.lang.reflect.Method method = guiClass.getMethod("getScrollOffset");
-            return (int) method.invoke(null);
-        } catch (Exception e) {
-            return 0; // 默认从0开始
-        }
+        return HotbarInventoryScreen.getScrollOffset();
     }
     
     /**
      * 从HotbarInventoryScreen获取最大快捷栏数量
      */
     private static int getMaxHotbarsFromGUI() {
-        try {
-            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
-            java.lang.reflect.Field field = guiClass.getDeclaredField("maxHotbars");
-            field.setAccessible(true);
-            return (int) field.get(null);
-        } catch (Exception e) {
-            return 9; // 默认9个
-        }
+        return HotbarManager.getHotbarCount();
     }
     
     // 渲染副手物品
