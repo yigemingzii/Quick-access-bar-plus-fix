@@ -266,15 +266,8 @@ public class HotbarManager {
      * 获取最大快捷栏数量
      */
     private static int getMaxHotbars() {
-        // 从HotbarInventoryScreen获取最大快捷栏数量
-        try {
-            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
-            java.lang.reflect.Field field = guiClass.getDeclaredField("maxHotbars");
-            field.setAccessible(true);
-            return (int) field.get(null);
-        } catch (Exception e) {
-            return 9; // 默认9个
-        }
+        // 直接使用hotbars的大小，不依赖GUI
+        return hotbars.size();
     }
     
     public static void scrollToNext() {
@@ -352,11 +345,22 @@ public class HotbarManager {
         return 1.0f - (float) Math.pow(1.0f - progress, 3);
     }
     
+    private static boolean configLoaded = false;
+    
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft minecraft = Minecraft.getInstance();
         Player player = minecraft.player;
-        if (player == null) return;
+        if (player == null) {
+            configLoaded = false;
+            return;
+        }
+        
+        // 加载配置（只在玩家第一次加入时）
+        if (!configLoaded) {
+            HotbarConfig.loadConfig();
+            configLoaded = true;
+        }
         
         // 减少切换冷却
         if (switchCooldown > 0) {
