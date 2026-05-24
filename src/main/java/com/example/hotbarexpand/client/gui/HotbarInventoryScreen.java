@@ -64,6 +64,11 @@ public class HotbarInventoryScreen {
     private static ItemStack draggedItem = ItemStack.EMPTY;
     private static int dragButton = -1;
     private static List<int[]> draggedSlots = new ArrayList<>(); // 记录已经分发过的槽位 [hotbarIdx, slotIdx]
+    
+    // 警告信息显示
+    private static final int WARNING_DURATION = 120;//示时长（tick）
+    private static int warningTimer = 0;
+    private static boolean showWidthWarning = false;
 
     @SubscribeEvent
     public static void onScreenInit(ScreenEvent.Init.Post event) {
@@ -71,19 +76,40 @@ public class HotbarInventoryScreen {
             return;
         }
         
+        // 生存模式下不展开背包GUI
+        if (HotbarManager.isSurvivalMode()) {
+            isPanelVisible = false;
+            return;
+        }
+        
         AbstractContainerScreen<?> screen = (AbstractContainerScreen<?>) event.getScreen();
+        
+        // 检查屏幕宽度是否足够
+        int guiLeft = screen.getGuiLeft();
+        int guiWidth = 176; // 原版背包宽度
+        int requiredWidth = guiWidth + PANEL_WIDTH + 45; // 背包 + 面板 + 间距（改为45）
+        
+        if (screen.width < requiredWidth) {
+            // 屏幕宽度不足，显示警告
+            showWidthWarning = true;
+            warningTimer = WARNING_DURATION;
+            isPanelVisible = false;
+            System.out.println("[HotbarExpand] Screen too narrow for hotbar panel: " + screen.width + " < " + requiredWidth);
+            return;
+        }
         
         // 每次打开背包都重新计算位置
         recalculatePanelPosition(screen);
         
-        // 初始化快捷栏列表（如果为空）
-        initHotbarList();
-        
-        // 同步当前索引和当前快捷栏数量
+        // 同步当前索引和当前快捷栏数量（必须先同步，再初始化列表）
         maxHotbars = HotbarManager.getHotbarCount();
         currentHotbarIndexCache = HotbarManager.getCurrentHotbarIndex();
         
+        // 初始化快捷栏列表（如果为空）
+        initHotbarList();
+        
         isPanelVisible = true;
+        showWidthWarning = false;
         System.out.println("[HotbarExpand] Hotbar panel positioned at (" + panelX + ", " + panelY + "), height=" + panelHeight);
     }
     
@@ -124,6 +150,23 @@ public class HotbarInventoryScreen {
         isPanelVisible = false;
         isDraggingScrollbar = false;
     }
+    
+    /**
+     * 游戏模式切换时调用
+     */
+    public static void onGameModeChanged() {
+        // 重置面板状态
+        isPanelVisible = false;
+        isDraggingScrollbar = false;
+        isDraggingItems = false;
+        draggedItem = ItemStack.EMPTY;
+        dragButton = -1;
+        draggedSlots.clear();
+        scrollOffset = 0;
+        showWidthWarning = false;
+        warningTimer = 0;
+        System.out.println("[HotbarExpand] HotbarInventoryScreen state reset due to game mode change");
+    }
 
     
     @SubscribeEvent
@@ -134,25 +177,40 @@ public class HotbarInventoryScreen {
             return;
         }
         
-        // 每次渲染前重新计算位置，确保位置正确
-        recalculatePanelPosition(screen);
-        isPanelVisible = true;
+        // 生存模式下不渲染任何内容
+        if (HotbarManager.isSurvivalMode()) {
+            return;
+        }
         
         GuiGraphics guiGraphics = event.getGuiGraphics();
         Minecraft minecraft = Minecraft.getInstance();
+        
+        // 处理警告信息计时器
+        if (warningTimer > 0) {
+            warningTimer--;
+        } else {
+            showWidthWarning = false;
+        }
+        
+        // 如果需要显示宽度警告，渲染警告文字
+        if (showWidthWarning) {
+            renderWidthWarning(guiGraphics, screen);
+            return;
+        }
+        
+        // 面板不可见时不渲染
+        if (!isPanelVisible) {
+            return;
+        }
+        
+        // 每次渲染前重新计算位置，确保位置正确
+        recalculatePanelPosition(screen);
         
         // 实时获取当前高亮索引，确保与HotbarManager同步
         currentHotbarIndexCache = HotbarManager.getCurrentHotbarIndex();
         
         RenderSystem.enableBlend();
         RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
-        
-        // 绘制背景（使用背包背景色）
-        renderPanelBackground(guiGraphics, panelX, panelY, PANEL_WIDTH - BUTTON_SIZE - BUTTON_GAP, panelHeight);
-        
-        // 绘制快捷栏列表区域
-        int contentStartY = panelY + 4;
-        int visibleCount = Math.min(VISIBLE_HOTBARS, maxHotbars - scrollOffset);
         
         // 每次渲染都重新获取当前索引和总快捷栏数量，确保没有残留
         maxHotbars = HotbarManager.getHotbarCount();
@@ -161,6 +219,13 @@ public class HotbarInventoryScreen {
             scrollOffset = maxScroll;
         }
         int realCurrentIndex = HotbarManager.getCurrentHotbarIndex();
+        
+        // 绘制背景（使用背包背景色）
+        renderPanelBackground(guiGraphics, panelX, panelY, PANEL_WIDTH - BUTTON_SIZE - BUTTON_GAP, panelHeight);
+        
+        // 绘制快捷栏列表区域
+        int contentStartY = panelY + 4;
+        int visibleCount = Math.min(VISIBLE_HOTBARS, maxHotbars - scrollOffset);
         
         for (int i = 0; i < visibleCount; i++) {
             int hotbarIdx = scrollOffset + i;
@@ -1551,5 +1616,33 @@ public class HotbarInventoryScreen {
      */
     public static int getVisibleHotbars() {
         return VISIBLE_HOTBARS;
+    }
+    
+    /**
+     * 渲染宽度不足警告
+     */
+    private static void renderWidthWarning(GuiGraphics guiGraphics, AbstractContainerScreen<?> screen) {
+        Minecraft minecraft = Minecraft.getInstance();
+        
+        // 警告文字
+        String warningText = "[警告]:在此宽度下无法展开快捷栏";
+        
+        // 计算文字位置（屏幕中央偏上）
+        int textWidth = minecraft.font.width(warningText);
+        int x = (screen.width - textWidth) / 2;
+        int y = screen.getGuiTop() - 30;
+        
+        // 绘制半透明背景
+        int padding = 4;
+        guiGraphics.fill(
+            x - padding, 
+            y - padding, 
+            x + textWidth + padding, 
+            y + minecraft.font.lineHeight + padding, 
+            0xAA000000
+        );
+        
+        // 绘制黄色警告文字
+        guiGraphics.drawString(minecraft.font, warningText, x, y, 0xFFFF00);
     }
 }

@@ -56,5 +56,8 @@ public class ClientSetup {
         event.register(HOTBAR_7_KEY);
         event.register(HOTBAR_8_KEY);
         event.register(HOTBAR_9_KEY);
+        
+        // 注册设置界面快捷键
+        event.register(HotbarConfig.getSettingsKey());
     }
 }

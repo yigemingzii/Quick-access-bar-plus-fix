@@ -5,8 +5,10 @@ import com.example.hotbarexpand.client.gui.HotbarInventoryScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.GameType;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.ClientPlayerChangeGameTypeEvent;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +28,12 @@ public class HotbarManager {
     // 切换冷却，防止同步干扰
     private static int switchCooldown = 0;
     
+    // 生存模式最大快捷栏数量
+    private static final int SURVIVAL_MAX_HOTBARS = 4;
+    
+    // 记录上一次的游戏模式，用于检测切换
+    private static GameType lastGameType = null;
+    
     static {
         // 初始化9个默认快捷栏
         for (int i = 0; i < 9; i++) {
@@ -36,6 +44,25 @@ public class HotbarManager {
             hotbars.add(hotbar);
             offhandSlots.add(ItemStack.EMPTY);
         }
+    }
+    
+    /**
+     * 检查当前是否为生存模式
+     */
+    public static boolean isSurvivalMode() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null) return false;
+        return minecraft.gameMode.getPlayerMode() == GameType.SURVIVAL;
+    }
+    
+    /**
+     * 获取当前模式下的最大快捷栏数量
+     */
+    public static int getMaxHotbarCount() {
+        if (isSurvivalMode()) {
+            return SURVIVAL_MAX_HOTBARS;
+        }
+        return hotbars.size();
     }
     
     /**
@@ -52,20 +79,76 @@ public class HotbarManager {
         }
     }
     
+    // 生存模式下：栏1-4固定对应背包的4行
+    // 栏1=快捷栏(0-8), 栏2=背包第1行(27-35), 栏3=背包第2行(18-26), 栏4=背包第3行(9-17)
+    // 切换时只改变快捷栏显示的内容，不改变栏的对应关系
+    
     public static List<ItemStack> getHotbar(int index) {
-        if (index >= 0) {
-            ensureHotbarExists(index);
-            return hotbars.get(index);
+        if (index < 0) return hotbars.get(0);
+        
+        // 生存模式下，快捷栏数据来自原版背包
+        if (isSurvivalMode() && index < SURVIVAL_MAX_HOTBARS) {
+            return getSurvivalHotbar(index);
         }
-        return hotbars.get(0);
+        
+        ensureHotbarExists(index);
+        return hotbars.get(index);
+    }
+    
+    /**
+     * 获取生存模式下的快捷栏数据（来自原版背包）
+     * 栏1-4固定对应背包的4行
+     */
+    private static List<ItemStack> getSurvivalHotbar(int index) {
+        Minecraft minecraft = Minecraft.getInstance();
+        Player player = minecraft.player;
+        if (player == null) return hotbars.get(index);
+        
+        int startSlot;
+        switch (index) {
+            case 0: // 栏1 = 快捷栏
+                startSlot = 0;
+                break;
+            case 1: // 栏2 = 背包第1行
+                startSlot = 27;
+                break;
+            case 2: // 栏3 = 背包第2行
+                startSlot = 18;
+                break;
+            case 3: // 栏4 = 背包第3行
+                startSlot = 9;
+                break;
+            default:
+                startSlot = 0;
+        }
+        
+        List<ItemStack> result = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            int slot = startSlot + i;
+            if (slot < player.getInventory().items.size()) {
+                result.add(player.getInventory().items.get(slot).copy());
+            } else {
+                result.add(ItemStack.EMPTY);
+            }
+        }
+        return result;
     }
     
     public static ItemStack getOffhandItem(int index) {
-        if (index >= 0) {
-            ensureHotbarExists(index);
-            return offhandSlots.get(index);
+        if (index < 0) return ItemStack.EMPTY;
+        
+        // 生存模式下，所有快捷栏共享同一个副手（原版副手）
+        if (isSurvivalMode()) {
+            Minecraft minecraft = Minecraft.getInstance();
+            Player player = minecraft.player;
+            if (player != null) {
+                return player.getInventory().offhand.get(0).copy();
+            }
+            return ItemStack.EMPTY;
         }
-        return ItemStack.EMPTY;
+        
+        ensureHotbarExists(index);
+        return offhandSlots.get(index);
     }
     
     public static void setOffhandItem(int index, ItemStack stack) {
@@ -88,6 +171,10 @@ public class HotbarManager {
      * 获取快捷栏数量
      */
     public static int getHotbarCount() {
+        // 生存模式下限制为4个快捷栏
+        if (isSurvivalMode()) {
+            return SURVIVAL_MAX_HOTBARS;
+        }
         return hotbars.size();
     }
     
@@ -174,8 +261,8 @@ public class HotbarManager {
     }
     
     public static void setCurrentHotbarIndex(int index) {
-        // 获取最大快捷栏数量（从GUI获取，默认9）
-        int maxHotbars = getMaxHotbars();
+        // 获取当前模式下的最大快捷栏数量
+        int maxHotbars = getMaxHotbarCount();
         
         if (index >= 0 && index < maxHotbars && index != currentHotbarIndex) {
             Minecraft minecraft = Minecraft.getInstance();
@@ -185,17 +272,18 @@ public class HotbarManager {
             // 设置切换冷却，防止同步干扰（必须在保存前设置）
             switchCooldown = 20;
             
-            // 先保存当前快捷栏
+            // 先保存当前快捷栏到对应的背包行
             savePlayerInventoryToHotbar(currentHotbarIndex);
             
             // 更新索引
             currentHotbarIndex = index;
             
-            // 加载新快捷栏到玩家背包（所有快捷栏都加载到玩家背包）
+            // 加载新快捷栏到玩家背包
             loadHotbarToPlayer(index);
             
             // 调试输出
             System.out.println("[HotbarExpand] Switched to hotbar " + (index + 1));
+            
             // 确保库存面板中的滚动偏移使选中的快捷栏可见
             try {
                 int visible = HotbarInventoryScreen.getVisibleHotbars();
@@ -271,13 +359,13 @@ public class HotbarManager {
     }
     
     public static void scrollToNext() {
-        int maxHotbars = getMaxHotbars();
+        int maxHotbars = getMaxHotbarCount();
         int nextIndex = (currentHotbarIndex + 1) % maxHotbars;
         setCurrentHotbarIndex(nextIndex);
     }
     
     public static void scrollToPrevious() {
-        int maxHotbars = getMaxHotbars();
+        int maxHotbars = getMaxHotbarCount();
         int prevIndex = (currentHotbarIndex - 1 + maxHotbars) % maxHotbars;
         setCurrentHotbarIndex(prevIndex);
     }
@@ -289,6 +377,12 @@ public class HotbarManager {
         
         // 确保索引有效
         if (index < 0) return;
+        
+        // 生存模式下：将快捷栏物品保存回对应的背包行
+        if (isSurvivalMode()) {
+            saveSurvivalHotbarToInventory(index);
+            return;
+        }
         
         // 确保快捷栏存在
         ensureHotbarExists(index);
@@ -304,6 +398,42 @@ public class HotbarManager {
         offhandSlots.set(index, player.getOffhandItem().copy());
     }
     
+    /**
+     * 生存模式下：将当前快捷栏物品保存回指定栏对应的背包行
+     */
+    private static void saveSurvivalHotbarToInventory(int index) {
+        Minecraft minecraft = Minecraft.getInstance();
+        Player player = minecraft.player;
+        if (player == null) return;
+        
+        int targetStartSlot;
+        switch (index) {
+            case 0: // 栏1 = 快捷栏
+                targetStartSlot = 0;
+                break;
+            case 1: // 栏2 = 背包第1行
+                targetStartSlot = 27;
+                break;
+            case 2: // 栏3 = 背包第2行
+                targetStartSlot = 18;
+                break;
+            case 3: // 栏4 = 背包第3行
+                targetStartSlot = 9;
+                break;
+            default:
+                return;
+        }
+        
+        // 将快捷栏(0-8)的物品复制到对应的背包行
+        for (int i = 0; i < 9; i++) {
+            ItemStack item = player.getInventory().getItem(i); // 快捷栏槽位
+            int targetSlot = targetStartSlot + i;
+            if (targetSlot < player.getInventory().items.size()) {
+                player.getInventory().items.set(targetSlot, item.copy());
+            }
+        }
+    }
+    
     private static void loadHotbarToPlayer(int index) {
         Minecraft minecraft = Minecraft.getInstance();
         Player player = minecraft.player;
@@ -311,6 +441,12 @@ public class HotbarManager {
         
         // 确保索引有效
         if (index < 0) return;
+        
+        // 生存模式下：从对应的背包行加载物品到快捷栏
+        if (isSurvivalMode()) {
+            loadSurvivalHotbarFromInventory(index);
+            return;
+        }
         
         // 确保快捷栏存在
         ensureHotbarExists(index);
@@ -325,6 +461,43 @@ public class HotbarManager {
         // 加载副手物品
         player.getInventory().offhand.set(0, offhandSlots.get(index).copy());
         System.out.println("[HotbarExpand] Hotbar loaded, switchCooldown = " + switchCooldown);
+    }
+    
+    /**
+     * 生存模式下：从指定栏对应的背包行加载物品到快捷栏
+     */
+    private static void loadSurvivalHotbarFromInventory(int index) {
+        Minecraft minecraft = Minecraft.getInstance();
+        Player player = minecraft.player;
+        if (player == null) return;
+
+        int sourceStartSlot;
+        switch (index) {
+            case 0: // 栏1 = 快捷栏
+                sourceStartSlot = 0;
+                break;
+            case 1: // 栏2 = 背包第1行
+                sourceStartSlot = 27;
+                break;
+            case 2: // 栏3 = 背包第2行
+                sourceStartSlot = 18;
+                break;
+            case 3: // 栏4 = 背包第3行
+                sourceStartSlot = 9;
+                break;
+            default:
+                return;
+        }
+
+        // 从对应的背包行复制物品到快捷栏(0-8)
+        for (int i = 0; i < 9; i++) {
+            int sourceSlot = sourceStartSlot + i;
+            ItemStack item = ItemStack.EMPTY;
+            if (sourceSlot < player.getInventory().items.size()) {
+                item = player.getInventory().items.get(sourceSlot);
+            }
+            player.getInventory().setItem(i, item.copy());
+        }
     }
     
     public static void savePlayerInventoryToCurrentHotbar() {
@@ -353,8 +526,18 @@ public class HotbarManager {
         Player player = minecraft.player;
         if (player == null) {
             configLoaded = false;
+            lastGameType = null;
             return;
         }
+        
+        // 检测游戏模式切换
+        GameType currentGameType = minecraft.gameMode.getPlayerMode();
+        if (lastGameType != null && lastGameType != currentGameType) {
+            // 游戏模式切换了，执行保存和重置
+            System.out.println("[HotbarExpand] Game mode changed from " + lastGameType + " to " + currentGameType);
+            onGameModeChanged(lastGameType, currentGameType);
+        }
+        lastGameType = currentGameType;
         
         // 加载配置（只在玩家第一次加入时）
         if (!configLoaded) {
@@ -373,19 +556,57 @@ public class HotbarManager {
             // 确保当前索引的快捷栏存在
             ensureHotbarExists(currentHotbarIndex);
             
-            // 同步当前快捷栏（所有索引都需要同步）
-            List<ItemStack> currentHotbar = hotbars.get(currentHotbarIndex);
-            for (int i = 0; i < 9; i++) {
-                ItemStack playerItem = player.getInventory().getItem(i);
-                if (!ItemStack.matches(currentHotbar.get(i), playerItem)) {
-                    currentHotbar.set(i, playerItem.copy());
+            // 非生存模式下同步当前快捷栏
+            if (!isSurvivalMode()) {
+                List<ItemStack> currentHotbar = hotbars.get(currentHotbarIndex);
+                for (int i = 0; i < 9; i++) {
+                    ItemStack playerItem = player.getInventory().getItem(i);
+                    if (!ItemStack.matches(currentHotbar.get(i), playerItem)) {
+                        currentHotbar.set(i, playerItem.copy());
+                    }
+                }
+                // 同步副手物品
+                ItemStack playerOffhand = player.getOffhandItem();
+                if (!ItemStack.matches(offhandSlots.get(currentHotbarIndex), playerOffhand)) {
+                    offhandSlots.set(currentHotbarIndex, playerOffhand.copy());
                 }
             }
-            // 同步副手物品
-            ItemStack playerOffhand = player.getOffhandItem();
-            if (!ItemStack.matches(offhandSlots.get(currentHotbarIndex), playerOffhand)) {
-                offhandSlots.set(currentHotbarIndex, playerOffhand.copy());
-            }
         }
+    }
+    
+    /**
+     * 游戏模式切换时调用
+     * 保存所有物品数据并重置运行状态
+     */
+    private static void onGameModeChanged(GameType oldMode, GameType newMode) {
+        Minecraft minecraft = Minecraft.getInstance();
+        Player player = minecraft.player;
+        if (player == null) return;
+        
+        System.out.println("[HotbarExpand] Processing game mode change...");
+        
+        // 1. 保存当前快捷栏数据
+        savePlayerInventoryToHotbar(currentHotbarIndex);
+        
+        // 2. 重置运行状态
+        switchCooldown = 0;
+        isExpanded = false;
+        
+        // 3. 触发全局同步 - 将所有快捷栏数据与当前玩家背包同步
+        // 从非生存模式切换到生存模式：将模组数据保存到原版背包
+        // 从生存模式切换到非生存模式：从模组数据加载到原版背包
+        if (newMode == GameType.SURVIVAL) {
+            // 切换到生存模式：不需要特殊处理，生存模式直接读取原版背包
+            System.out.println("[HotbarExpand] Switched to SURVIVAL mode - using vanilla inventory");
+        } else {
+            // 切换到创造模式或其他模式：加载当前快捷栏到玩家背包
+            System.out.println("[HotbarExpand] Switched to " + newMode + " mode - loading hotbar data");
+            loadHotbarToPlayer(currentHotbarIndex);
+        }
+        
+        // 4. 通知GUI刷新
+        HotbarInventoryScreen.onGameModeChanged();
+        
+        System.out.println("[HotbarExpand] Game mode change processing complete");
     }
 }

@@ -286,37 +286,12 @@ public class ExpandedHotbarOverlay {
             return;
         }
         
-        // 1x1模式下：收起时滚轮跨组切换，展开时Alt+滚轮跨组切换
+        // 1x1模式下：收起时单栏循环不跨栏，展开时普通滚轮和Alt+滚轮都可以跨栏
         if (!isExpanded() && !isExpanding) {
-            // 1x1收起状态：滚轮跨组切换
-            double scrollDelta = event.getScrollDeltaY();
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft.player == null) return;
-            
-            int selectedSlot = minecraft.player.getInventory().selected;
-            int maxHotbars = HotbarManager.getHotbarCount();
-            int currentIndex = getCurrentHotbarIndex();
-            
-            // 处理向上滚动（slot减小到0）- 切换到上一组（上一个快捷栏）
-            if (scrollDelta > 0 && selectedSlot == 0) {
-                int newIndex = currentIndex - 1;
-                if (newIndex < 0) newIndex = maxHotbars - 1;
-                minecraft.player.getInventory().selected = 8;
-                setCurrentHotbarIndex(newIndex);
-                System.out.println("[HotbarExpand] 1x1 collapsed scroll up to previous hotbar: " + (newIndex + 1));
-                event.setCanceled(true);
-            }
-            // 处理向下滚动（slot增大到8）- 切换到下一组（下一个快捷栏）
-            else if (scrollDelta < 0 && selectedSlot == 8) {
-                int newIndex = currentIndex + 1;
-                if (newIndex >= maxHotbars) newIndex = 0;
-                minecraft.player.getInventory().selected = 0;
-                setCurrentHotbarIndex(newIndex);
-                System.out.println("[HotbarExpand] 1x1 collapsed scroll down to next hotbar: " + (newIndex + 1));
-                event.setCanceled(true);
-            }
+            // 1x1收起状态：单栏内循环，不跨栏
+            // 不处理滚轮事件，保持原版行为（slot 0-8之间循环）
         } else {
-            // 1x1展开状态：Alt+滚轮跨组切换
+            // 1x1展开状态：普通滚轮滚到头跨栏，Alt+滚轮直接跨栏
             if (expandProgress < 0.3f) return;
             
             double scrollDelta = event.getScrollDeltaY();
@@ -328,7 +303,28 @@ public class ExpandedHotbarOverlay {
             int currentIndex = getCurrentHotbarIndex();
             
             if (Screen.hasAltDown()) {
+                // Alt+滚轮直接跨栏
                 handleAltScroll(minecraft, scrollDelta, currentIndex, maxHotbars, event);
+            } else {
+                // 普通滚轮：滚到头时跨栏
+                // 处理向上滚动（slot减小到0）- 切换到上一个快捷栏
+                if (scrollDelta > 0 && selectedSlot == 0) {
+                    int newIndex = currentIndex - 1;
+                    if (newIndex < 0) newIndex = maxHotbars - 1;
+                    minecraft.player.getInventory().selected = 8;
+                    setCurrentHotbarIndex(newIndex);
+                    System.out.println("[HotbarExpand] 1x1 expanded scroll up to previous hotbar: " + (newIndex + 1));
+                    event.setCanceled(true);
+                }
+                // 处理向下滚动（slot增大到8）- 切换到下一个快捷栏
+                else if (scrollDelta < 0 && selectedSlot == 8) {
+                    int newIndex = currentIndex + 1;
+                    if (newIndex >= maxHotbars) newIndex = 0;
+                    minecraft.player.getInventory().selected = 0;
+                    setCurrentHotbarIndex(newIndex);
+                    System.out.println("[HotbarExpand] 1x1 expanded scroll down to next hotbar: " + (newIndex + 1));
+                    event.setCanceled(true);
+                }
             }
         }
     }
@@ -523,7 +519,7 @@ public class ExpandedHotbarOverlay {
     // 保持原版hotbar始终渲染，不再取消
 
     /**
-     * 取消原版快捷栏渲染（非1x1模式下）
+     * 取消原版快捷栏渲染（非1x1模式下）并移动其他GUI元素
      */
     @SubscribeEvent
     public static void onRenderGuiLayer(RenderGuiLayerEvent.Pre event) {
@@ -532,6 +528,55 @@ public class ExpandedHotbarOverlay {
         // 取消原版快捷栏渲染
         if (event.getName().equals(VanillaGuiLayers.HOTBAR)) {
             event.setCanceled(true);
+        }
+        
+        // 1x2和2x2模式下，将经验值条、血量、饱食度等向上移动
+        HotbarConfig.LayoutMode layout = HotbarConfig.getLayout();
+        if (layout == HotbarConfig.LayoutMode.ONE_X_TWO || layout == HotbarConfig.LayoutMode.TWO_X_TWO) {
+            // 方块字幕额外多移动24像素
+            int offsetY = isOverlayMessageLayer(event.getName()) ? 24:24;
+            
+            // 需要向上移动的元素
+            if (isMovableGuiLayer(event.getName())) {
+                event.getGuiGraphics().pose().pushPose();
+                event.getGuiGraphics().pose().translate(0, -offsetY, 0);
+            }
+        }
+    }
+    
+    /**
+     * 检查是否是方块字幕层（手持物品名称）
+     */
+    private static boolean isOverlayMessageLayer(ResourceLocation layerName) {
+        return layerName.equals(VanillaGuiLayers.SELECTED_ITEM_NAME);
+    }
+    
+    /**
+     * 检查是否需要移动的GUI层
+     */
+    private static boolean isMovableGuiLayer(ResourceLocation layerName) {
+        return layerName.equals(VanillaGuiLayers.EXPERIENCE_BAR) ||
+               layerName.equals(VanillaGuiLayers.EXPERIENCE_LEVEL) ||
+               layerName.equals(VanillaGuiLayers.PLAYER_HEALTH) ||
+               layerName.equals(VanillaGuiLayers.FOOD_LEVEL) ||
+               layerName.equals(VanillaGuiLayers.ARMOR_LEVEL) ||
+               layerName.equals(VanillaGuiLayers.AIR_LEVEL) ||
+               layerName.equals(VanillaGuiLayers.SELECTED_ITEM_NAME) ||
+               layerName.equals(VanillaGuiLayers.JUMP_METER);
+    }
+    
+    /**
+     * GUI层渲染后恢复矩阵
+     */
+    @SubscribeEvent
+    public static void onRenderGuiLayerPost(RenderGuiLayerEvent.Post event) {
+        if (HotbarConfig.getLayout() == HotbarConfig.LayoutMode.ONE_X_ONE) return;
+        
+        HotbarConfig.LayoutMode layout = HotbarConfig.getLayout();
+        if (layout == HotbarConfig.LayoutMode.ONE_X_TWO || layout == HotbarConfig.LayoutMode.TWO_X_TWO) {
+            if (isMovableGuiLayer(event.getName())) {
+                event.getGuiGraphics().pose().popPose();
+            }
         }
     }
 
@@ -585,6 +630,9 @@ public class ExpandedHotbarOverlay {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null) return;
         if (minecraft.options.hideGui) return;
+        
+        // 如果打开了背包界面，不渲染主界面快捷栏
+        if (minecraft.screen != null) return;
 
         GuiGraphics guiGraphics = event.getGuiGraphics();
         int screenWidth = minecraft.getWindow().getGuiScaledWidth();
@@ -1023,17 +1071,12 @@ public class ExpandedHotbarOverlay {
     }
     
     /**
-     * 从HotbarInventoryScreen获取最大快捷栏数量
+     * 获取最大快捷栏数量
+     * 优先从HotbarManager获取（包含生存模式判断）
      */
     private static int getMaxHotbarsFromGUI() {
-        try {
-            Class<?> guiClass = Class.forName("com.example.hotbarexpand.client.gui.HotbarInventoryScreen");
-            java.lang.reflect.Field field = guiClass.getDeclaredField("maxHotbars");
-            field.setAccessible(true);
-            return (int) field.get(null);
-        } catch (Exception e) {
-            return 9; // 默认9个
-        }
+        // 直接从HotbarManager获取，它会处理生存模式的逻辑
+        return HotbarManager.getHotbarCount();
     }
     
     // 渲染副手物品

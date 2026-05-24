@@ -1,9 +1,13 @@
 package com.example.hotbarexpand.client;
 
+import com.mojang.blaze3d.platform.InputConstants;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.world.entity.player.Player;
+import net.neoforged.neoforge.client.settings.KeyConflictContext;
+import net.neoforged.neoforge.client.settings.KeyModifier;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -42,6 +46,16 @@ public class HotbarConfig {
     }
 
     private static LayoutMode currentLayout = LayoutMode.ONE_X_ONE;
+    
+    // 设置界面快捷键（默认Ctrl+N）
+    private static KeyMapping settingsKey = new KeyMapping(
+        "key.hotbarexpand.settings",
+        KeyConflictContext.IN_GAME,
+        KeyModifier.CONTROL,
+        InputConstants.Type.KEYSYM,
+        InputConstants.KEY_N,
+        "key.categories.hotbarexpand"
+    );
 
     public static LayoutMode getLayout() {
         return currentLayout;
@@ -50,6 +64,10 @@ public class HotbarConfig {
     public static void setLayout(LayoutMode layout) {
         currentLayout = layout;
         saveConfig();
+    }
+    
+    public static KeyMapping getSettingsKey() {
+        return settingsKey;
     }
 
     public static void loadConfig() {

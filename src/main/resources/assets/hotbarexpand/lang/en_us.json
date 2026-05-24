@@ -9,5 +9,7 @@
   "key.hotbarexpand.hotbar_6": "Select Hotbar 6",
   "key.hotbarexpand.hotbar_7": "Select Hotbar 7",
   "key.hotbarexpand.hotbar_8": "Select Hotbar 8",
-  "key.hotbarexpand.hotbar_9": "Select Hotbar 9"
+  "key.hotbarexpand.hotbar_9": "Select Hotbar 9",
+  "key.hotbarexpand.settings": "Open Hotbar Settings (Ctrl+N)",
+  "key.categories.hotbarexpand": "Hotbar Expand"
 }

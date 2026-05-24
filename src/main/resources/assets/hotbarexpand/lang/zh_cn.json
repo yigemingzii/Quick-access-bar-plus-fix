@@ -9,5 +9,7 @@
   "key.hotbarexpand.hotbar_6": "选择快捷栏 6",
   "key.hotbarexpand.hotbar_7": "选择快捷栏 7",
   "key.hotbarexpand.hotbar_8": "选择快捷栏 8",
-  "key.hotbarexpand.hotbar_9": "选择快捷栏 9"
+  "key.hotbarexpand.hotbar_9": "选择快捷栏 9",
+  "key.hotbarexpand.settings": "打开快捷栏设置 (Ctrl+N)",
+  "key.categories.hotbarexpand": "快捷栏扩展"
 }
