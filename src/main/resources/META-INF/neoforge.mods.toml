@@ -8,6 +8,7 @@ version="1.0.0"
 displayName="QuickAccessBar++"
 authors="熬凌翔"
 description='''更多的快捷栏'''
+logoFile="123.png"
 
 [[dependencies.hotbarexpand]]
 modId="neoforge"

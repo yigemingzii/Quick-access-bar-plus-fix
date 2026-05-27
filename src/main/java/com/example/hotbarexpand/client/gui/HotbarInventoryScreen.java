@@ -1,5 +1,6 @@
 package com.example.hotbarexpand.client.gui;
 
+import com.example.hotbarexpand.client.HotbarConfig;
 import com.example.hotbarexpand.client.HotbarManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.platform.InputConstants;
@@ -8,11 +9,14 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ServerboundSetCreativeModeSlotPacket;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.GameType;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.client.event.ContainerScreenEvent;
 import net.neoforged.neoforge.client.event.ScreenEvent;
@@ -52,7 +56,8 @@ public class HotbarInventoryScreen {
     private static List<ItemStack> offhandList = new ArrayList<>();
     private static int maxHotbars = 9; // 默认9个快捷栏
     private static int scrollOffset = 0; // 滚动偏移
-    private static final int VISIBLE_HOTBARS = 9; // 可见快捷栏数量
+    // 背包界面固定显示9个快捷栏（不随主界面设置变化）
+    private static final int INVENTORY_VISIBLE_HOTBARS = 9;
     
     // 滚动条拖动状态
     private static boolean isDraggingScrollbar = false;
@@ -133,7 +138,7 @@ public class HotbarInventoryScreen {
         int guiTop = screen.getGuiTop() - 15;
         int guiHeight = 166; // 原版背包高度
         
-        panelHeight = VISIBLE_HOTBARS * (SLOT_SIZE + PADDING) + 8; // 快捷栏 + 边距
+        panelHeight = INVENTORY_VISIBLE_HOTBARS * (SLOT_SIZE + PADDING) + 8; // 快捷栏 + 边距
         panelY = guiTop + (guiHeight - panelHeight) / 2; // 垂直居中
         
         // 计算X位置：背包右侧 + 间距
@@ -149,6 +154,12 @@ public class HotbarInventoryScreen {
     public static void onScreenClose(ScreenEvent.Closing event) {
         isPanelVisible = false;
         isDraggingScrollbar = false;
+        
+        // 非生存模式下保存当前快捷栏
+        if (!HotbarManager.isSurvivalMode()) {
+            HotbarManager.savePlayerInventoryToCurrentHotbar();
+            System.out.println("[HotbarExpand] Saved current hotbar on screen close");
+        }
     }
     
     /**
@@ -214,48 +225,48 @@ public class HotbarInventoryScreen {
         
         // 每次渲染都重新获取当前索引和总快捷栏数量，确保没有残留
         maxHotbars = HotbarManager.getHotbarCount();
-        int maxScroll = Math.max(0, maxHotbars - VISIBLE_HOTBARS);
+        int maxScroll = Math.max(0, maxHotbars - INVENTORY_VISIBLE_HOTBARS);
         if (scrollOffset > maxScroll) {
             scrollOffset = maxScroll;
         }
         int realCurrentIndex = HotbarManager.getCurrentHotbarIndex();
-        
+
         // 绘制背景（使用背包背景色）
         renderPanelBackground(guiGraphics, panelX, panelY, PANEL_WIDTH - BUTTON_SIZE - BUTTON_GAP, panelHeight);
-        
+
         // 绘制快捷栏列表区域
         int contentStartY = panelY + 4;
-        int visibleCount = Math.min(VISIBLE_HOTBARS, maxHotbars - scrollOffset);
-        
+        int visibleCount = Math.min(INVENTORY_VISIBLE_HOTBARS, maxHotbars - scrollOffset);
+
         for (int i = 0; i < visibleCount; i++) {
             int hotbarIdx = scrollOffset + i;
             int rowY = contentStartY + i * (SLOT_SIZE + PADDING);
             // 每次都直接从HotbarManager获取当前索引进行比较
             boolean isCurrent = (hotbarIdx == realCurrentIndex);
-            
+
             // 绘制编号按钮背景
             int numberX = panelX + 4;
             renderNumberButton(guiGraphics, numberX, rowY, hotbarIdx + 1, isCurrent);
-            
+
             // 绘制9个物品槽位（添加间距）
             int contentStartX = panelX + NUMBER_WIDTH + NUMBER_GAP + 4;
             for (int slotIdx = 0; slotIdx < 9; slotIdx++) {
                 int slotX = contentStartX + slotIdx * SLOT_SIZE;
                 renderSlot(guiGraphics, slotX, rowY, hotbarIdx, slotIdx, isCurrent, minecraft);
             }
-            
+
             // 绘制副手槽位
             int offhandX = contentStartX + 9 * SLOT_SIZE + 2;
             renderOffhandSlot(guiGraphics, offhandX, rowY, hotbarIdx, isCurrent, minecraft);
         }
-        
+
         // 计算滚动条位置
         int scrollbarX = panelX + NUMBER_WIDTH + NUMBER_GAP + CONTENT_WIDTH + 4;
-        int scrollbarHeight = VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
-        
+        int scrollbarHeight = INVENTORY_VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
+
         // 绘制滚动条（使用背包样式）
-        renderScrollbar(guiGraphics, scrollbarX, contentStartY, SCROLLBAR_WIDTH, 
-                scrollbarHeight, scrollOffset, maxHotbars, VISIBLE_HOTBARS);
+        renderScrollbar(guiGraphics, scrollbarX, contentStartY, SCROLLBAR_WIDTH,
+                scrollbarHeight, scrollOffset, maxHotbars, INVENTORY_VISIBLE_HOTBARS);
         
         // 绘制加减按钮（在滚动条右侧）- 上移5像素，右移3像素
         int buttonX = scrollbarX + SCROLLBAR_WIDTH + BUTTON_GAP + 3;
@@ -463,6 +474,26 @@ public class HotbarInventoryScreen {
         }
     }
     
+    /**
+     * 同步物品到服务器（创造模式）
+     * @param slotIdx 槽位索引（0-8为快捷栏）
+     * @param stack 物品堆
+     */
+    private static void syncItemToServer(int slotIdx, ItemStack stack) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.gameMode == null) return;
+        if (minecraft.gameMode.getPlayerMode() != GameType.CREATIVE) return;
+        
+        ClientPacketListener connection = minecraft.getConnection();
+        if (connection == null) return;
+        
+        // 在创造模式协议中，快捷栏槽位编号是 36-44（对应玩家背包窗口）
+        // 而不是 0-8（对应玩家背包对象）
+        // 36 = 快捷栏第1格，44 = 快捷栏第9格
+        int creativeSlot = 36 + slotIdx;
+        connection.send(new ServerboundSetCreativeModeSlotPacket(creativeSlot, stack));
+    }
+    
     // ========== 鼠标滚轮事件 ==========
     
     @SubscribeEvent
@@ -482,41 +513,41 @@ public class HotbarInventoryScreen {
         // 检查鼠标是否在GUI面板内
         int contentStartY = panelY + 4;
         int scrollbarX = panelX + NUMBER_WIDTH + NUMBER_GAP + CONTENT_WIDTH + 4;
-        int scrollbarHeight = VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
+        int scrollbarHeight = INVENTORY_VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
         int panelRight = scrollbarX + SCROLLBAR_WIDTH + BUTTON_SIZE + BUTTON_GAP + 4;
-        
-        if (mouseX >= panelX && mouseX <= panelRight && 
+
+        if (mouseX >= panelX && mouseX <= panelRight &&
             mouseY >= panelY && mouseY <= panelY + panelHeight) {
             // 鼠标在GUI内，处理滚动
             double scrollDelta = event.getScrollDeltaY();
-            
+
             if (scrollDelta > 0 && scrollOffset > 0) {
                 // 向上滚动
                 scrollOffset--;
                 event.setCanceled(true);
-            } else if (scrollDelta < 0 && scrollOffset < maxHotbars - VISIBLE_HOTBARS) {
+            } else if (scrollDelta < 0 && scrollOffset < maxHotbars - INVENTORY_VISIBLE_HOTBARS) {
                 // 向下滚动
                 scrollOffset++;
                 event.setCanceled(true);
             }
         }
     }
-    
+
     // ========== 鼠标交互 ==========
-    
+
     @SubscribeEvent
     public static void onMouseClick(ScreenEvent.MouseButtonPressed.Pre event) {
         if (!isPanelVisible) return;
         if (!(event.getScreen() instanceof InventoryScreen) && !(event.getScreen() instanceof CreativeModeInventoryScreen)) {
             return;
         }
-        
+
         double mouseX = event.getMouseX();
         double mouseY = event.getMouseY();
-        
+
         int contentStartY = panelY + 4;
         int scrollbarX = panelX + NUMBER_WIDTH + NUMBER_GAP + CONTENT_WIDTH + 4;
-        int scrollbarHeight = VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
+        int scrollbarHeight = INVENTORY_VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
         // 按钮位置上移5像素，右移3像素（与渲染一致）
         int buttonX = scrollbarX + SCROLLBAR_WIDTH + BUTTON_GAP + 3;
         int buttonStartY = contentStartY - 5;
@@ -580,15 +611,15 @@ public class HotbarInventoryScreen {
         if (mouseX >= scrollbarX && mouseX <= scrollbarX + SCROLLBAR_WIDTH &&
             mouseY >= contentStartY && mouseY <= contentStartY + scrollbarHeight) {
             System.out.println("[HotbarExpand] Clicked scrollbar area, maxHotbars=" + maxHotbars);
-            if (maxHotbars > VISIBLE_HOTBARS) {
+            if (maxHotbars > INVENTORY_VISIBLE_HOTBARS) {
                 // 计算滑块高度和位置
-                float ratio = (float) VISIBLE_HOTBARS / maxHotbars;
+                float ratio = (float) INVENTORY_VISIBLE_HOTBARS / maxHotbars;
                 int thumbHeight = Math.max(20, (int)(scrollbarHeight * ratio));
-                float scrollRatio = (float) scrollOffset / (maxHotbars - VISIBLE_HOTBARS);
+                float scrollRatio = (float) scrollOffset / (maxHotbars - INVENTORY_VISIBLE_HOTBARS);
                 int thumbY = contentStartY + (int)((scrollbarHeight - thumbHeight) * scrollRatio);
-                
+
                 System.out.println("[HotbarExpand] Thumb at Y=" + thumbY + "-" + (thumbY + thumbHeight) + ", click at Y=" + mouseY);
-                
+
                 // 检查是否点击了滑块本身
                 if (mouseY >= thumbY && mouseY <= thumbY + thumbHeight) {
                     // 开始拖动滑块
@@ -599,7 +630,7 @@ public class HotbarInventoryScreen {
                 } else {
                     // 点击滚动条其他位置，直接跳转
                     float clickRatio = (float)(mouseY - contentStartY) / scrollbarHeight;
-                    int maxScroll = maxHotbars - VISIBLE_HOTBARS;
+                    int maxScroll = maxHotbars - INVENTORY_VISIBLE_HOTBARS;
                     scrollOffset = Math.min(maxScroll, Math.max(0, (int)(clickRatio * maxScroll)));
                     System.out.println("[HotbarExpand] Jumped to scrollOffset=" + scrollOffset);
                 }
@@ -607,9 +638,9 @@ public class HotbarInventoryScreen {
             event.setCanceled(true);
             return;
         }
-        
+
         // 检查是否点击了编号按钮（切换快捷栏）
-        int visibleCount = Math.min(VISIBLE_HOTBARS, maxHotbars - scrollOffset);
+        int visibleCount = Math.min(INVENTORY_VISIBLE_HOTBARS, maxHotbars - scrollOffset);
         System.out.println("[HotbarExpand] Checking number buttons, visibleCount=" + visibleCount + ", scrollOffset=" + scrollOffset);
         for (int i = 0; i < visibleCount; i++) {
             int hotbarIdx = scrollOffset + i;
@@ -688,11 +719,11 @@ public class HotbarInventoryScreen {
         // 检查鼠标是否在面板区域内
         int contentStartY = panelY + 4;
         int scrollbarX = panelX + NUMBER_WIDTH + NUMBER_GAP + CONTENT_WIDTH + 4;
-        int scrollbarHeight = VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
+        int scrollbarHeight = INVENTORY_VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
         int buttonX = scrollbarX + SCROLLBAR_WIDTH + BUTTON_GAP + 3;
         int panelRight = buttonX + BUTTON_SIZE + 4;
         int panelBottom = contentStartY + scrollbarHeight;
-        boolean inPanelArea = mouseX >= panelX && mouseX <= panelRight && 
+        boolean inPanelArea = mouseX >= panelX && mouseX <= panelRight &&
                               mouseY >= panelY && mouseY <= panelBottom;
         
         // 结束物品拖动
@@ -738,46 +769,46 @@ public class HotbarInventoryScreen {
         
         // 处理滚动条拖动
         if (isDraggingScrollbar) {
-            if (maxHotbars <= VISIBLE_HOTBARS) {
+            if (maxHotbars <= INVENTORY_VISIBLE_HOTBARS) {
                 isDraggingScrollbar = false;
                 return;
             }
-            
+
             double mouseY = event.getMouseY();
             int contentStartY = panelY + 4;
-            int scrollbarHeight = VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
-            
+            int scrollbarHeight = INVENTORY_VISIBLE_HOTBARS * (SLOT_SIZE + PADDING);
+
             // 计算滑块高度
-            float ratio = (float) VISIBLE_HOTBARS / maxHotbars;
+            float ratio = (float) INVENTORY_VISIBLE_HOTBARS / maxHotbars;
             int thumbHeight = Math.max(20, (int)(scrollbarHeight * ratio));
             int availableHeight = scrollbarHeight - thumbHeight;
-            
+
             if (availableHeight <= 0) {
                 isDraggingScrollbar = false;
                 return;
             }
-            
+
             // 计算鼠标拖动的距离对应的滚动偏移
-            int maxScroll = maxHotbars - VISIBLE_HOTBARS;
+            int maxScroll = maxHotbars - INVENTORY_VISIBLE_HOTBARS;
             float dragRatio = (float)(mouseY - contentStartY - (thumbHeight / 2)) / availableHeight;
             scrollOffset = Math.min(maxScroll, Math.max(0, (int)(dragRatio * maxScroll)));
-            
+
             System.out.println("[HotbarExpand] Dragging scrollbar: mouseY=" + mouseY + ", scrollOffset=" + scrollOffset);
-            
+
             // 取消事件，防止其他处理程序干扰
             event.setCanceled(true);
             return;
         }
-        
+
         // 处理物品拖动分发
         if (!isDraggingItems) return;
-        
+
         double mouseX = event.getMouseX();
         double mouseY = event.getMouseY();
-        
+
         int contentStartY = panelY + 4;
         int contentStartX = panelX + NUMBER_WIDTH + NUMBER_GAP + 4;
-        int visibleCount = Math.min(VISIBLE_HOTBARS, maxHotbars - scrollOffset);
+        int visibleCount = Math.min(INVENTORY_VISIBLE_HOTBARS, maxHotbars - scrollOffset);
         
         // 检查是否拖到了新的槽位
         for (int i = 0; i < visibleCount; i++) {
@@ -868,9 +899,11 @@ public class HotbarInventoryScreen {
 
         // 如果槽位为空，直接放置所有物品
         if (slotItem.isEmpty()) {
-            setHotbarItem(hotbarIdx, slotIdx, carriedItem.copy());
+            ItemStack newStack = carriedItem.copy();
+            setHotbarItem(hotbarIdx, slotIdx, newStack);
             if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
-                minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
+                minecraft.player.getInventory().setItem(slotIdx, newStack.copy());
+                syncItemToServer(slotIdx, newStack);
             }
             minecraft.player.containerMenu.setCarried(ItemStack.EMPTY);
             isDraggingItems = false;
@@ -887,6 +920,7 @@ public class HotbarInventoryScreen {
                 setHotbarItem(hotbarIdx, slotIdx, newSlot);
                 if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
                     minecraft.player.getInventory().setItem(slotIdx, newSlot.copy());
+                    syncItemToServer(slotIdx, newSlot);
                 }
 
                 ItemStack newCarried = carriedItem.copy();
@@ -899,9 +933,11 @@ public class HotbarInventoryScreen {
                 System.out.println("[HotbarExpand] Left click merged " + toAdd + " items to hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
             } else {
                 // 槽位已满，交换
-                setHotbarItem(hotbarIdx, slotIdx, carriedItem.copy());
+                ItemStack newStack = carriedItem.copy();
+                setHotbarItem(hotbarIdx, slotIdx, newStack);
                 if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
-                    minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
+                    minecraft.player.getInventory().setItem(slotIdx, newStack.copy());
+                    syncItemToServer(slotIdx, newStack);
                 }
                 minecraft.player.containerMenu.setCarried(slotItem.copy());
                 isDraggingItems = false;
@@ -909,9 +945,11 @@ public class HotbarInventoryScreen {
             }
         } else {
             // 不同物品，交换
-            setHotbarItem(hotbarIdx, slotIdx, carriedItem.copy());
+            ItemStack newStack = carriedItem.copy();
+            setHotbarItem(hotbarIdx, slotIdx, newStack);
             if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
-                minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
+                minecraft.player.getInventory().setItem(slotIdx, newStack.copy());
+                syncItemToServer(slotIdx, newStack);
             }
             minecraft.player.containerMenu.setCarried(slotItem.copy());
             isDraggingItems = false;
@@ -956,6 +994,7 @@ public class HotbarInventoryScreen {
             // 如果修改的是当前快捷栏，同步到玩家背包
             if (targetHotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
                 minecraft.player.getInventory().setItem(targetSlotIdx, newStack.copy());
+                syncItemToServer(targetSlotIdx, newStack);
             }
         }
         
@@ -1008,6 +1047,7 @@ public class HotbarInventoryScreen {
         // 如果修改的是当前快捷栏，同步到玩家背包
         if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
             minecraft.player.getInventory().setItem(slotIdx, newSlotItem.copy());
+            syncItemToServer(slotIdx, newSlotItem);
         }
         
         // 减少手持物品数量
@@ -1075,7 +1115,7 @@ public class HotbarInventoryScreen {
                 currentHotbarIndexCache = HotbarManager.getCurrentHotbarIndex();
                 
                 // 调整滚动偏移 - 确保不会超出范围
-                int maxScroll = Math.max(0, maxHotbars - VISIBLE_HOTBARS);
+                int maxScroll = Math.max(0, maxHotbars - INVENTORY_VISIBLE_HOTBARS);
                 if (scrollOffset > maxScroll) {
                     scrollOffset = maxScroll;
                 }
@@ -1084,8 +1124,8 @@ public class HotbarInventoryScreen {
                     scrollOffset = currentHotbarIndexCache;
                 }
                 // 如果当前选中的快捷栏在滚动区域下方，调整滚动偏移
-                if (currentHotbarIndexCache >= scrollOffset + VISIBLE_HOTBARS) {
-                    scrollOffset = Math.max(0, currentHotbarIndexCache - VISIBLE_HOTBARS + 1);
+                if (currentHotbarIndexCache >= scrollOffset + INVENTORY_VISIBLE_HOTBARS) {
+                    scrollOffset = Math.max(0, currentHotbarIndexCache - INVENTORY_VISIBLE_HOTBARS + 1);
                 }
                 
                 // 播放音效
@@ -1140,8 +1180,8 @@ public class HotbarInventoryScreen {
             currentHotbarIndexCache = currentIdx + 1;
             
             // 调整滚动偏移
-            if (currentHotbarIndexCache >= scrollOffset + VISIBLE_HOTBARS) {
-                scrollOffset = currentHotbarIndexCache - VISIBLE_HOTBARS + 1;
+            if (currentHotbarIndexCache >= scrollOffset + INVENTORY_VISIBLE_HOTBARS) {
+                scrollOffset = currentHotbarIndexCache - INVENTORY_VISIBLE_HOTBARS + 1;
             }
             
             // 播放音效
@@ -1170,12 +1210,19 @@ public class HotbarInventoryScreen {
         
         // 中键/拾取键处理：在背包界面恢复创造模式下复制整组行为（其他情况保留原版）
         if (isPickItemButton(button)) {
+            // 创造模式下：复制整组物品到光标
             if (minecraft.player.hasInfiniteMaterials() && !slotItem.isEmpty()) {
                 ItemStack copy = slotItem.copy();
                 copy.setCount(copy.getMaxStackSize());
                 minecraft.player.containerMenu.setCarried(copy);
                 System.out.println("[HotbarExpand] Inventory middle-click copied item in creative mode");
                 return true;
+            }
+            // 非创造模式或创造模式下点击空槽位：尝试选取该物品（跨栏）
+            if (!slotItem.isEmpty()) {
+                boolean found = findAndSelectItem(slotItem);
+                System.out.println("[HotbarExpand] Inventory middle-click pick item: " + slotItem.getItem() + ", found=" + found);
+                return found;
             }
             return false;
         }
@@ -1220,13 +1267,16 @@ public class HotbarInventoryScreen {
             setHotbarItem(hotbarIdx, slotIdx, ItemStack.EMPTY);
             if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
                 minecraft.player.getInventory().setItem(slotIdx, ItemStack.EMPTY);
+                syncItemToServer(slotIdx, ItemStack.EMPTY);
             }
             System.out.println("[HotbarExpand] Left click picked up all items from hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
         } else if (!carriedItem.isEmpty() && slotItem.isEmpty()) {
             // 手持物品点击空槽位：放下所有物品
-            setHotbarItem(hotbarIdx, slotIdx, carriedItem.copy());
+            ItemStack newStack = carriedItem.copy();
+            setHotbarItem(hotbarIdx, slotIdx, newStack);
             if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
-                minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
+                minecraft.player.getInventory().setItem(slotIdx, newStack.copy());
+                syncItemToServer(slotIdx, newStack);
             }
             minecraft.player.containerMenu.setCarried(ItemStack.EMPTY);
             System.out.println("[HotbarExpand] Left click placed all items to hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
@@ -1245,6 +1295,7 @@ public class HotbarInventoryScreen {
                     setHotbarItem(hotbarIdx, slotIdx, newSlot);
                     if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
                         minecraft.player.getInventory().setItem(slotIdx, newSlot.copy());
+                        syncItemToServer(slotIdx, newSlot);
                     }
 
                     ItemStack newCarried = carriedItem.copy();
@@ -1256,18 +1307,22 @@ public class HotbarInventoryScreen {
                     System.out.println("[HotbarExpand] Left click merged " + toAdd + " items to hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
                 } else {
                     // 槽位已满，交换物品
-                    setHotbarItem(hotbarIdx, slotIdx, carriedItem.copy());
+                    ItemStack newStack = carriedItem.copy();
+                    setHotbarItem(hotbarIdx, slotIdx, newStack);
                     if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
-                        minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
+                        minecraft.player.getInventory().setItem(slotIdx, newStack.copy());
+                        syncItemToServer(slotIdx, newStack);
                     }
                     minecraft.player.containerMenu.setCarried(slotItem.copy());
                     System.out.println("[HotbarExpand] Left click swapped items (slot full) at hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
                 }
             } else {
                 // 不同物品：交换
-                setHotbarItem(hotbarIdx, slotIdx, carriedItem.copy());
+                ItemStack newStack = carriedItem.copy();
+                setHotbarItem(hotbarIdx, slotIdx, newStack);
                 if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
-                    minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
+                    minecraft.player.getInventory().setItem(slotIdx, newStack.copy());
+                    syncItemToServer(slotIdx, newStack);
                 }
                 minecraft.player.containerMenu.setCarried(slotItem.copy());
                 System.out.println("[HotbarExpand] Left click swapped items (different) at hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
@@ -1296,6 +1351,7 @@ public class HotbarInventoryScreen {
             setHotbarItem(hotbarIdx, slotIdx, resultSlot);
             if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
                 minecraft.player.getInventory().setItem(slotIdx, resultSlot.copy());
+                syncItemToServer(slotIdx, resultSlot);
             }
             System.out.println("[HotbarExpand] Right click picked up half from hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
         } else if (!carriedItem.isEmpty() && slotItem.isEmpty()) {
@@ -1305,6 +1361,7 @@ public class HotbarInventoryScreen {
             setHotbarItem(hotbarIdx, slotIdx, resultSlot);
             if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
                 minecraft.player.getInventory().setItem(slotIdx, resultSlot.copy());
+                syncItemToServer(slotIdx, resultSlot);
             }
 
             ItemStack resultCarried = carriedItem.copy();
@@ -1324,6 +1381,7 @@ public class HotbarInventoryScreen {
                     setHotbarItem(hotbarIdx, slotIdx, newSlot);
                     if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
                         minecraft.player.getInventory().setItem(slotIdx, newSlot.copy());
+                        syncItemToServer(slotIdx, newSlot);
                     }
 
                     ItemStack newCarried = carriedItem.copy();
@@ -1337,9 +1395,11 @@ public class HotbarInventoryScreen {
                 // 槽位已满，不做任何事
             } else {
                 // 不同物品：交换
-                setHotbarItem(hotbarIdx, slotIdx, carriedItem.copy());
+                ItemStack newStack = carriedItem.copy();
+                setHotbarItem(hotbarIdx, slotIdx, newStack);
                 if (hotbarIdx == HotbarManager.getCurrentHotbarIndex()) {
-                    minecraft.player.getInventory().setItem(slotIdx, carriedItem.copy());
+                    minecraft.player.getInventory().setItem(slotIdx, newStack.copy());
+                    syncItemToServer(slotIdx, newStack);
                 }
                 minecraft.player.containerMenu.setCarried(slotItem.copy());
                 System.out.println("[HotbarExpand] Right click swapped items at hotbar=" + (hotbarIdx + 1) + ", slot=" + (slotIdx + 1));
@@ -1607,15 +1667,23 @@ public class HotbarInventoryScreen {
      */
     public static void setScrollOffset(int offset) {
         int maxHotbars = HotbarManager.getHotbarCount();
-        int maxScroll = Math.max(0, maxHotbars - VISIBLE_HOTBARS);
+        int maxScroll = Math.max(0, maxHotbars - INVENTORY_VISIBLE_HOTBARS);
         scrollOffset = Math.min(maxScroll, Math.max(0, offset));
     }
-    
+
     /**
      * 获取可见快捷栏数量
      */
     public static int getVisibleHotbars() {
-        return VISIBLE_HOTBARS;
+        return INVENTORY_VISIBLE_HOTBARS;
+    }
+
+    /**
+     * 重置滚动偏移（游戏模式切换时调用）
+     */
+    public static void resetScrollOffset() {
+        scrollOffset = 0;
+        System.out.println("[HotbarExpand] Scroll offset reset");
     }
     
     /**

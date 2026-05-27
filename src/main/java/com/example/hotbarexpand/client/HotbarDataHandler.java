@@ -1,7 +1,6 @@
 package com.example.hotbarexpand.client;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtAccounter;
@@ -9,7 +8,6 @@ import net.minecraft.nbt.Tag;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
-import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -18,26 +16,67 @@ import java.util.List;
 
 /**
  * 快捷栏数据处理器 - 负责保存和加载快捷栏数据到本地文件
+ * 
+ * 存储结构：
+ * .minecraft/hotbarexpand/
+ * ├── worlds/                    # 单人世界数据
+ * │   └── <世界名称>/
+ * │       ├── hotbars.dat        # 快捷栏数据
+ * │       └── config.dat         # 世界特定配置
+ * ├── servers/                   # 多人服务器数据
+ * │   └── <服务器地址>/
+ * │       ├── hotbars.dat
+ * │       └── config.dat
+ * └── global.dat                 # 全局配置
  */
 public class HotbarDataHandler {
     
-    private static final String DATA_FILE_NAME = "hotbarexpand_data.dat";
-    private static String lastServerAddress = null;
+    private static final String DATA_FOLDER = "hotbarexpand";
+    private static final String WORLDS_FOLDER = "worlds";
+    private static final String SERVERS_FOLDER = "servers";
+    private static final String HOTBARS_FILE = "hotbars.dat";
+    private static final String CONFIG_FILE = "config.dat";
+    private static final String GLOBAL_FILE = "global.dat";
+    
+    // 当前世界/服务器的标识
+    private static String currentWorldId = null;
+    private static boolean isSinglePlayer = false;
     
     /**
      * 当客户端玩家加入服务器时加载数据
      */
     @SubscribeEvent
     public static void onPlayerJoin(ClientPlayerNetworkEvent.LoggingIn event) {
-        System.out.println("[HotbarExpand] Player logging in, loading hotbar data...");
-        // 记录当前服务器地址，用于退出时保存
+        System.out.println("[HotbarExpand] Player logging in, initializing storage...");
+        
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.getCurrentServer() != null) {
-            lastServerAddress = minecraft.getCurrentServer().ip.replace(":", "_");
-        } else if (minecraft.hasSingleplayerServer()) {
-            lastServerAddress = "singleplayer_" + minecraft.getSingleplayerServer().getWorldData().getLevelName();
+        
+        // 确定当前世界/服务器标识
+        if (minecraft.hasSingleplayerServer()) {
+            // 单人游戏
+            isSinglePlayer = true;
+            String worldName = minecraft.getSingleplayerServer().getWorldData().getLevelName();
+            currentWorldId = sanitizeFileName(worldName);
+            System.out.println("[HotbarExpand] Single player world: " + worldName + " (ID: " + currentWorldId + ")");
+        } else if (minecraft.getCurrentServer() != null) {
+            // 多人游戏
+            isSinglePlayer = false;
+            String serverAddress = minecraft.getCurrentServer().ip;
+            currentWorldId = sanitizeFileName(serverAddress);
+            System.out.println("[HotbarExpand] Multiplayer server: " + serverAddress + " (ID: " + currentWorldId + ")");
+        } else {
+            System.out.println("[HotbarExpand] Unknown game mode, cannot determine storage location");
+            return;
         }
+        
+        // 确保存储目录存在
+        ensureStorageDirectory();
+        
+        // 加载数据
         loadHotbarData();
+        
+        // 初始化栏追踪
+        System.out.println("[HotbarExpand] Hotbar tracking initialized");
     }
     
     /**
@@ -47,25 +86,56 @@ public class HotbarDataHandler {
     public static void onPlayerLeave(ClientPlayerNetworkEvent.LoggingOut event) {
         System.out.println("[HotbarExpand] Player logging out, saving hotbar data...");
         saveHotbarData();
-        lastServerAddress = null;
+        currentWorldId = null;
     }
     
     /**
      * 保存快捷栏数据到文件
      */
     public static void saveHotbarData() {
+        if (currentWorldId == null) {
+            System.out.println("[HotbarExpand] No world ID, cannot save data");
+            return;
+        }
+        
         try {
-            File saveDir = getSaveDirectory();
-            if (saveDir == null) {
-                System.out.println("[HotbarExpand] Cannot get save directory");
+            File dataDir = getDataDirectory();
+            if (dataDir == null) {
+                System.out.println("[HotbarExpand] Cannot get data directory");
                 return;
             }
             
-            File dataFile = new File(saveDir, DATA_FILE_NAME);
+            // 保存快捷栏数据
+            saveHotbarsData(dataDir);
+            
+            // 保存配置数据
+            saveConfigData(dataDir);
+            
+            System.out.println("[HotbarExpand] Data saved to " + dataDir.getAbsolutePath());
+        } catch (Exception e) {
+            System.out.println("[HotbarExpand] Error saving hotbar data: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 保存快捷栏数据
+     */
+    private static void saveHotbarsData(File dataDir) {
+        try {
+            File dataFile = new File(dataDir, HOTBARS_FILE);
             CompoundTag rootTag = new CompoundTag();
+            
+            // 保存版本信息（用于未来兼容性）
+            rootTag.putInt("Version", 1);
+            rootTag.putString("ModVersion", "1.0.0");
             
             // 保存当前选中的快捷栏索引
             rootTag.putInt("CurrentHotbarIndex", HotbarManager.getCurrentHotbarIndex());
+            
+            // 保存栏身份映射（生存模式使用）
+            int[] identityMap = getHotbarIdentityMap();
+            rootTag.putIntArray("IdentityMap", identityMap);
             
             // 保存所有快捷栏数据
             ListTag hotbarsList = new ListTag();
@@ -84,7 +154,6 @@ public class HotbarDataHandler {
                     if (!item.isEmpty()) {
                         CompoundTag itemTag = new CompoundTag();
                         itemTag.putInt("Slot", j);
-                        // 使用 save 方法，传入 Provider（可以为 null）
                         CompoundTag savedItem = (CompoundTag) item.save(null);
                         if (savedItem != null) {
                             itemTag.put("Item", savedItem);
@@ -111,19 +180,37 @@ public class HotbarDataHandler {
             rootTag.put("Hotbars", hotbarsList);
             rootTag.putInt("HotbarCount", hotbarCount);
             
-            // 删除旧的保存文件（如果存在），确保数据完全重新写入
-            if (dataFile.exists()) {
-                dataFile.delete();
-            }
-            
             // 写入文件
             try (FileOutputStream fos = new FileOutputStream(dataFile)) {
                 net.minecraft.nbt.NbtIo.writeCompressed(rootTag, fos);
             }
             
-            System.out.println("[HotbarExpand] Saved " + hotbarCount + " hotbars to " + dataFile.getAbsolutePath());
+            System.out.println("[HotbarExpand] Saved " + hotbarCount + " hotbars");
         } catch (Exception e) {
-            System.out.println("[HotbarExpand] Error saving hotbar data: " + e.getMessage());
+            System.out.println("[HotbarExpand] Error saving hotbars data: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 保存配置数据
+     */
+    private static void saveConfigData(File dataDir) {
+        try {
+            File configFile = new File(dataDir, CONFIG_FILE);
+            CompoundTag configTag = new CompoundTag();
+            
+            // 保存配置
+            configTag.putString("Layout", HotbarConfig.getLayout().name());
+            
+            // 写入文件
+            try (FileOutputStream fos = new FileOutputStream(configFile)) {
+                net.minecraft.nbt.NbtIo.writeCompressed(configTag, fos);
+            }
+            
+            System.out.println("[HotbarExpand] Config saved");
+        } catch (Exception e) {
+            System.out.println("[HotbarExpand] Error saving config: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -132,16 +219,38 @@ public class HotbarDataHandler {
      * 从文件加载快捷栏数据
      */
     public static void loadHotbarData() {
+        if (currentWorldId == null) {
+            System.out.println("[HotbarExpand] No world ID, cannot load data");
+            return;
+        }
+        
         try {
-            File saveDir = getSaveDirectory();
-            if (saveDir == null) {
-                System.out.println("[HotbarExpand] Cannot get save directory");
+            File dataDir = getDataDirectory();
+            if (dataDir == null) {
+                System.out.println("[HotbarExpand] Cannot get data directory");
                 return;
             }
             
-            File dataFile = new File(saveDir, DATA_FILE_NAME);
+            // 加载快捷栏数据
+            loadHotbarsData(dataDir);
+            
+            // 加载配置数据
+            loadConfigData(dataDir);
+            
+        } catch (Exception e) {
+            System.out.println("[HotbarExpand] Error loading hotbar data: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * 加载快捷栏数据
+     */
+    private static void loadHotbarsData(File dataDir) {
+        try {
+            File dataFile = new File(dataDir, HOTBARS_FILE);
             if (!dataFile.exists()) {
-                System.out.println("[HotbarExpand] No saved data found");
+                System.out.println("[HotbarExpand] No saved hotbar data found");
                 return;
             }
             
@@ -150,8 +259,18 @@ public class HotbarDataHandler {
                 rootTag = net.minecraft.nbt.NbtIo.readCompressed(fis, NbtAccounter.unlimitedHeap());
             }
             
+            // 检查版本
+            int version = rootTag.getInt("Version");
+            System.out.println("[HotbarExpand] Loading data version " + version);
+            
             // 加载当前选中的快捷栏索引
             int currentIndex = rootTag.getInt("CurrentHotbarIndex");
+            
+            // 加载栏身份映射
+            if (rootTag.contains("IdentityMap")) {
+                int[] identityMap = rootTag.getIntArray("IdentityMap");
+                setHotbarIdentityMap(identityMap);
+            }
             
             // 加载保存的快捷栏数量
             int savedHotbarCount = rootTag.getInt("HotbarCount");
@@ -160,12 +279,12 @@ public class HotbarDataHandler {
             ListTag hotbarsList = rootTag.getList("Hotbars", Tag.TAG_COMPOUND);
             int loadedCount = 0;
             
-            // 先清空现有数据，确保从干净状态开始
+            // 先清空现有数据
             HotbarManager.clearAllHotbars();
             
             // 确保加载正确数量的快捷栏
             for (int i = 0; i < savedHotbarCount; i++) {
-                HotbarManager.getHotbar(i); // 这会创建空快捷栏
+                HotbarManager.getHotbar(i);
             }
             
             for (int i = 0; i < hotbarsList.size(); i++) {
@@ -182,7 +301,6 @@ public class HotbarDataHandler {
                     int slot = itemTag.getInt("Slot");
                     if (itemTag.contains("Item")) {
                         CompoundTag itemData = itemTag.getCompound("Item");
-                        // 使用 parse 方法加载物品
                         ItemStack item = ItemStack.parse(null, itemData).orElse(ItemStack.EMPTY);
                         if (slot >= 0 && slot < 9) {
                             hotbar.set(slot, item);
@@ -203,77 +321,97 @@ public class HotbarDataHandler {
             // 设置当前选中的快捷栏
             HotbarManager.setCurrentHotbarIndex(currentIndex);
             
-            System.out.println("[HotbarExpand] Loaded " + loadedCount + " hotbars (expected " + savedHotbarCount + ") from " + dataFile.getAbsolutePath());
+            System.out.println("[HotbarExpand] Loaded " + loadedCount + " hotbars from " + dataFile.getAbsolutePath());
         } catch (Exception e) {
-            System.out.println("[HotbarExpand] Error loading hotbar data: " + e.getMessage());
+            System.out.println("[HotbarExpand] Error loading hotbars data: " + e.getMessage());
             e.printStackTrace();
         }
     }
     
     /**
-     * 获取保存目录
+     * 加载配置数据
      */
-    private static File getSaveDirectory() {
+    private static void loadConfigData(File dataDir) {
         try {
-            // 获取Minecraft实例
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft == null) return null;
+            File configFile = new File(dataDir, CONFIG_FILE);
+            if (!configFile.exists()) {
+                System.out.println("[HotbarExpand] No saved config found");
+                return;
+            }
             
-            // 获取当前世界的服务器数据目录
-            File gameDir = minecraft.gameDirectory;
-            File savesDir = new File(gameDir, "saves");
+            CompoundTag configTag;
+            try (FileInputStream fis = new FileInputStream(configFile)) {
+                configTag = net.minecraft.nbt.NbtIo.readCompressed(fis, NbtAccounter.unlimitedHeap());
+            }
             
-            // 优先使用记录的lastServerAddress（用于退出时保存）
-            if (lastServerAddress != null) {
-                if (lastServerAddress.startsWith("singleplayer_")) {
-                    String worldName = lastServerAddress.substring("singleplayer_".length());
-                    File worldDir = new File(savesDir, worldName);
-                    File dataDir = new File(worldDir, "hotbarexpand");
-                    if (!dataDir.exists()) {
-                        dataDir.mkdirs();
-                    }
-                    return dataDir;
-                } else {
-                    File serverDir = new File(new File(gameDir, "hotbarexpand"), lastServerAddress);
-                    if (!serverDir.exists()) {
-                        serverDir.mkdirs();
-                    }
-                    return serverDir;
+            // 加载布局
+            if (configTag.contains("Layout")) {
+                String layoutName = configTag.getString("Layout");
+                try {
+                    HotbarConfig.LayoutMode layout = HotbarConfig.LayoutMode.valueOf(layoutName);
+                    HotbarConfig.setLayout(layout);
+                } catch (IllegalArgumentException e) {
+                    System.out.println("[HotbarExpand] Unknown layout: " + layoutName);
                 }
             }
             
-            // 如果是单人游戏，使用世界名称
-            if (minecraft.hasSingleplayerServer() && minecraft.getSingleplayerServer() != null) {
-                String worldName = minecraft.getSingleplayerServer().getWorldData().getLevelName();
-                File worldDir = new File(savesDir, worldName);
-                File dataDir = new File(worldDir, "hotbarexpand");
-                if (!dataDir.exists()) {
-                    dataDir.mkdirs();
-                }
-                return dataDir;
-            }
-            // 如果是多人游戏，使用服务器地址
-            else if (minecraft.getCurrentServer() != null) {
-                String serverAddress = minecraft.getCurrentServer().ip.replace(":", "_");
-                File serverDir = new File(new File(gameDir, "hotbarexpand"), serverAddress);
-                if (!serverDir.exists()) {
-                    serverDir.mkdirs();
-                }
-                return serverDir;
-            }
+            System.out.println("[HotbarExpand] Config loaded");
         } catch (Exception e) {
-            System.out.println("[HotbarExpand] Error getting save directory: " + e.getMessage());
+            System.out.println("[HotbarExpand] Error loading config: " + e.getMessage());
+            e.printStackTrace();
         }
-        // 回退：使用游戏目录下的 hotbarexpand 目录，确保可以保存
-        try {
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft != null && minecraft.gameDirectory != null) {
-                File fallback = new File(minecraft.gameDirectory, "hotbarexpand");
-                if (!fallback.exists()) fallback.mkdirs();
-                return fallback;
-            }
-        } catch (Exception ignored) {
+    }
+    
+    /**
+     * 获取数据存储目录
+     */
+    private static File getDataDirectory() {
+        if (currentWorldId == null) return null;
+        
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.gameDirectory == null) return null;
+        
+        File baseDir = new File(minecraft.gameDirectory, DATA_FOLDER);
+        File typeDir = new File(baseDir, isSinglePlayer ? WORLDS_FOLDER : SERVERS_FOLDER);
+        File worldDir = new File(typeDir, currentWorldId);
+        
+        if (!worldDir.exists()) {
+            worldDir.mkdirs();
         }
-        return null;
+        
+        return worldDir;
+    }
+    
+    /**
+     * 确保存储目录存在
+     */
+    private static void ensureStorageDirectory() {
+        File dataDir = getDataDirectory();
+        if (dataDir != null && !dataDir.exists()) {
+            dataDir.mkdirs();
+        }
+    }
+    
+    /**
+     * 清理文件名中的非法字符
+     */
+    private static String sanitizeFileName(String name) {
+        if (name == null) return "unknown";
+        // 替换Windows和Unix中的非法字符
+        return name.replaceAll("[\\\\/:*?\"<>|]", "_");
+    }
+    
+    /**
+     * 获取栏身份映射（从HotbarManager）
+     */
+    private static int[] getHotbarIdentityMap() {
+        return HotbarManager.getHotbarIdentityMap();
+    }
+    
+    /**
+     * 设置栏身份映射（到HotbarManager）
+     */
+    private static void setHotbarIdentityMap(int[] map) {
+        HotbarManager.setHotbarIdentityMap(map);
     }
 }
